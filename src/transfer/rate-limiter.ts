@@ -73,6 +73,9 @@ export class RateLimiter {
 
   async consume(bytes: number, options: RateLimitOptions = {}): Promise<void> {
     const merged = { ...this.defaults, ...options };
+    if (merged.signal?.aborted) {
+      throw new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true });
+    }
     const bytesPerSecond = Number(merged.bytesPerSecond);
     let remaining = Math.max(0, Number(bytes) || 0);
     if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0 || remaining === 0) return;

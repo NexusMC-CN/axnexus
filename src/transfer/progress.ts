@@ -19,6 +19,7 @@ export interface ProgressTrackerOptions {
   onProgress?: ProgressListener;
   progressInterval?: number;
   now?: () => number;
+  signal?: AbortSignal;
   rateLimiter?: import('./rate-limiter.js').RateLimiter;
   rateLimit?: import('./rate-limiter.js').RateLimitOptions;
 }
@@ -98,7 +99,12 @@ export function trackReadableStream(
           tracker.complete();
           controller.close();
         } else {
-          if (options.rateLimiter) await options.rateLimiter.consume(result.value.byteLength, { ...options.rateLimit, signal: options.rateLimit?.signal });
+          if (options.rateLimiter) {
+            await options.rateLimiter.consume(result.value.byteLength, {
+              ...options.rateLimit,
+              signal: options.signal ?? options.rateLimit?.signal,
+            });
+          }
           tracker.update(tracker.loaded + result.value.byteLength);
           controller.enqueue(result.value);
         }

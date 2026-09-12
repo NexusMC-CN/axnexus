@@ -38,3 +38,23 @@ test('passes the cancellation signal to each chunk upload', async () => {
   });
   assert.equal(receivedSignal, controller.signal);
 });
+
+test('retries only the failed chunk and reports each failed attempt', async () => {
+  const attempts = new Map<number, number>();
+  const failures: number[] = [];
+  const result = await uploadChunks(new Uint8Array([1, 2, 3, 4]), {
+    chunkSize: 2,
+    retry: 1,
+    retryDelay: 0,
+    onPartError: ({ part }) => failures.push(part.index),
+    upload: async ({ index }) => {
+      const next = (attempts.get(index) ?? 0) + 1;
+      attempts.set(index, next);
+      if (index === 1 && next === 1) throw new Error('temporary');
+      return index;
+    },
+  });
+  assert.deepEqual(result, [0, 1]);
+  assert.deepEqual([...attempts.entries()], [[0, 1], [1, 2]]);
+  assert.deepEqual(failures, [1]);
+});

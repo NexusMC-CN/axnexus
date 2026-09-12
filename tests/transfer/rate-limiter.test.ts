@@ -50,3 +50,13 @@ test('keeps an initial byte burst after a request task initializes the group', a
   await limiter.consume(500);
   assert.equal(Date.now() - started < 80, true);
 });
+
+test('rejects byte consumption immediately when its signal is already aborted', async () => {
+  const limiter = new RateLimiter({ bytesPerSecond: 1000 });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    limiter.consume(1, { signal: controller.signal }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+});

@@ -134,3 +134,150 @@ test('maps asynchronous JSON parser failures to ERR_BAD_PAYLOAD', async () => {
     (error: unknown) => error instanceof HttpError && error.code === 'ERR_BAD_PAYLOAD',
   );
 });
+
+test('merges request retry objects with client defaults and preserves explicit delay precedence', async () => {
+  let attempts = 0;
+  const delays: number[] = [];
+  const client = createHttpClient({
+    retry: { limit: 2, statusCodes: [503], delay: 1 },
+    retryDelay: 2,
+    adapter: async () => {
+      attempts += 1;
+      return new Response('{"busy":true}', { status: 503 });
+    },
+  });
+
+  await assert.rejects(client.get('/retry-merge', {
+    retry: { limit: 1 },
+    retryDelay: (attempt: number) => { delays.push(attempt); return 0; },
+  } as never));
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [1]);
+});
+
+test('does not share cached data between response types', async () => {
+  let reads = 0;
+  const client = createHttpClient({
+    cache: { ttl: 1_000 },
+    adapter: async (config) => {
+      reads += 1;
+      return config.responseType === 'text'
+        ? new Response('plain', { status: 200 })
+        : new Response('{"reads":' + reads + '}', { status: 200 });
+    },
+  });
+
+  assert.deepEqual(await client.get('/cache-type'), { reads: 1 });
+  assert.equal(await client.get<string>('/cache-type', { responseType: 'text' }), 'plain');
+  assert.equal(reads, 2);
+});
+
+test('request cancellation does not wait on a shared cached loader', async () => {
+  let resolveResponse!: (response: Response) => void;
+  let adapterStarted!: () => void;
+  const started = new Promise<void>((resolve) => { adapterStarted = resolve; });
+  let reads = 0;
+  const client = createHttpClient({
+    cache: { ttl: 1_000 },
+    adapter: async (config) => {
+      reads += 1;
+      adapterStarted();
+      return new Promise<Response>((resolve, reject) => {
+        resolveResponse = resolve;
+        config.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    },
+  });
+  const controller = new AbortController();
+  const pending = client.get('/cache-cancel', { signal: controller.signal });
+  await started;
+  controller.abort();
+  await assert.rejects(pending, (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED');
+  resolveResponse(new Response('{"ok":true}', { status: 200 }));
+  assert.equal(reads, 1);
+});
+
+test('does not cache GET responses when body limits, progress, or rate limits are request-specific', async () => {
+  let reads = 0;
+  const client = createHttpClient({
+    cache: { ttl: 1_000 },
+    adapter: async () => {
+      reads += 1;
+      return new Response('12345', { status: 200, headers: { 'content-type': 'text/plain' } });
+    },
+  });
+  await assert.rejects(client.get('/cache-body-limit', { responseType: 'text', maxBodySize: 3 }), (error: unknown) =>
+    error instanceof HttpError && error.code === 'ERR_MAX_BODY_SIZE');
+  assert.equal(await client.get('/cache-body-limit', { responseType: 'text', maxBodySize: 10 }), '12345');
+  assert.equal(reads, 2);
+});
+
+test('normalizes custom JSON serialization failures', async () => {
+  const client = createHttpClient({ adapter: async () => new Response('{"ok":true}', { status: 200 }) });
+  await assert.rejects(
+    client.post('/serialize-error', { value: true }, { stringifyJson: () => { throw new Error('serialize failed'); } }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_TRANSFORM_REQUEST',
+  );
+});
+
+test('maps response transform failures to ERR_TRANSFORM_RESPONSE', async () => {
+  const client = createHttpClient({
+    adapter: async () => new Response('{"ok":true}', { status: 200 }),
+  });
+  await assert.rejects(
+    client.get('/transform-error', { transformResponse: () => { throw new Error('transform failed'); } }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_TRANSFORM_RESPONSE',
+  );
+});
+
+test('maps request transform failures to ERR_TRANSFORM_REQUEST', async () => {
+  const client = createHttpClient({ adapter: async () => new Response('{"ok":true}', { status: 200 }) });
+  await assert.rejects(
+    client.post('/transform-request-error', { ok: true }, { transformRequest: () => { throw new Error('transform failed'); } }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_TRANSFORM_REQUEST',
+  );
+});
+
+test('does not retry a status accepted by validateStatus', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: 2,
+    adapter: async () => {
+      attempts += 1;
+      return new Response('{"accepted":true}', { status: 503 });
+    },
+  });
+  const result = await client.get('/accepted-status', { validateStatus: (status) => status < 600 });
+  assert.deepEqual(result, { accepted: true });
+  assert.equal(attempts, 1);
+});
+
+test('bounds non-success response payloads with maxBodySize', async () => {
+  const client = createHttpClient({
+    adapter: async () => new Response('0123456789', {
+      status: 500,
+      headers: { 'content-type': 'text/plain' },
+    }),
+  });
+  await assert.rejects(
+    client.get('/large-error', { maxBodySize: 3 }),
+    (error: unknown) => error instanceof HttpError
+      && error.code === 'ERR_BAD_RESPONSE'
+      && error.response?.data === null,
+  );
+});
+
+test('aborts response body reads when the single-attempt timeout expires', async () => {
+  const client = createHttpClient({
+    adapter: async () => new Response(new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}),
+    }), { status: 200 }),
+  });
+  await assert.rejects(
+    Promise.race([
+      client.get('/slow-body', { timeout: 5 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('body read hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ETIMEDOUT',
+  );
+});

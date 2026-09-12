@@ -39,10 +39,24 @@ function mergeHeaders(defaults: unknown, request: unknown, method: string): Head
 }
 
 function normalizeRetry(value: number | RetryOptions | undefined, fallback: number | RetryOptions | undefined): RetryOptions {
-  const selected = value ?? fallback;
-  if (typeof selected === 'number') return { limit: Math.max(0, Math.floor(Number(selected) || 0)) };
-  if (selected && typeof selected === 'object') return { ...selected, limit: Math.max(0, Math.floor(Number(selected.limit) || 0)) };
-  return { limit: 0 };
+  const base: RetryOptions = typeof fallback === 'number'
+    ? { limit: Math.max(0, Math.floor(Number(fallback) || 0)) }
+    : fallback && typeof fallback === 'object'
+      ? { ...fallback }
+      : {};
+  if (typeof value === 'number') {
+    return { ...base, limit: Math.max(0, Math.floor(Number(value) || 0)) };
+  }
+  if (value && typeof value === 'object') {
+    return {
+      ...base,
+      ...value,
+      limit: value.limit === undefined
+        ? Math.max(0, Math.floor(Number(base.limit) || 0))
+        : Math.max(0, Math.floor(Number(value.limit) || 0)),
+    };
+  }
+  return { ...base, limit: Math.max(0, Math.floor(Number(base.limit) || 0)) };
 }
 
 function normalizeTimeout(value: number | undefined): number {
@@ -88,7 +102,19 @@ function cacheKey(config: ResolvedRequestConfig): string {
   const headerEntries = Array.from(config.headers.entries())
     .filter(([name]) => name !== 'x-request-id')
     .sort(([a], [b]) => a.localeCompare(b));
-  return `${config.method} ${config.url} ${JSON.stringify(headerEntries)}`;
+  return JSON.stringify({
+    method: config.method,
+    url: config.url,
+    responseType: config.responseType ?? 'json',
+    credentials: config.credentials ?? '',
+    mode: config.mode ?? '',
+    redirect: config.redirect ?? '',
+    referrer: config.referrer ?? '',
+    referrerPolicy: config.referrerPolicy ?? '',
+    integrity: config.integrity ?? '',
+    keepalive: Boolean(config.keepalive),
+    headers: headerEntries,
+  });
 }
 
 function responseMessage(payload: unknown, status: number): string {
@@ -119,8 +145,8 @@ function statusShouldThrow(config: ResolvedRequestConfig, status: number): boole
   return !(status >= 200 && status < 300);
 }
 
-async function readResponsePayload(response: Response): Promise<unknown> {
-  return readErrorPayload(response);
+async function readResponsePayload(response: Response, maxBodySize?: number, signal?: AbortSignal): Promise<unknown> {
+  return readErrorPayload(response, maxBodySize, signal);
 }
 
 async function parseResponse(
@@ -128,8 +154,9 @@ async function parseResponse(
   type: ResponseType,
   maxBodySize: number | undefined,
   parseJson: RequestConfig['parseJson'],
+  signal?: AbortSignal,
 ): Promise<unknown> {
-  return readResponse(response, type, maxBodySize, parseJson);
+  return readResponse(response, type, maxBodySize, parseJson, signal);
 }
 
 function buildFetchAdapter(): HttpAdapter {
@@ -140,6 +167,7 @@ async function createResolvedConfig(
   defaults: HttpClientConfig,
   request: RequestConfig,
   requestIdEnabled: boolean | (() => string),
+  applyTransforms = true,
 ): Promise<ResolvedRequestConfig> {
   const method = String(request.method || 'GET').toUpperCase();
   const baseURL = request.baseURL ?? defaults.baseURL ?? '';
@@ -154,11 +182,27 @@ async function createResolvedConfig(
     headers.set('X-Request-Id', typeof requestIdEnabled === 'function' ? requestIdEnabled() : createRequestId());
   }
   const requestTransforms = request.transformRequest ?? defaults.transformRequest;
-  const transformedData = Object.prototype.hasOwnProperty.call(request, 'data')
-    ? await applyRequestTransforms(request.data, requestTransforms, headers)
-    : request.data;
+  let transformedData = request.data;
+  if (applyTransforms && Object.prototype.hasOwnProperty.call(request, 'data')) {
+    try {
+      transformedData = await applyRequestTransforms(request.data, requestTransforms, headers);
+    } catch (cause) {
+      throw new HttpError('Request transform failed', {
+        code: 'ERR_TRANSFORM_REQUEST',
+        cause,
+      });
+    }
+  }
   const stringifyJson = request.stringifyJson ?? defaults.stringifyJson ?? JSON.stringify;
-  const body = encodeBody(transformedData, request.body, headers, stringifyJson);
+  let body: BodyInit | null | undefined;
+  try {
+    body = encodeBody(transformedData, request.body, headers, stringifyJson);
+  } catch (cause) {
+    throw new HttpError('Request body serialization failed', {
+      code: 'ERR_TRANSFORM_REQUEST',
+      cause,
+    });
+  }
   return {
     ...defaults,
     ...request,
@@ -338,7 +382,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           const metadata = adapterOutput instanceof Response ? undefined : (adapterOutput as AdapterResult).metadata;
           const headersAt = Date.now();
           if (statusShouldThrow(attemptConfig, rawResponse.status)) {
-            const payload = await readResponsePayload(rawResponse);
+            const payload = await readResponsePayload(rawResponse, attemptResolved.maxBodySize, attemptConfig.signal);
             const response: HttpResponse<unknown> = {
               data: payload,
               status: rawResponse.status,
@@ -364,8 +408,23 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
               retryable: retryOn.has(rawResponse.status),
             });
           }
-          const data = await parseResponse(rawResponse, attemptResolved.responseType ?? 'json', attemptResolved.maxBodySize, attemptResolved.parseJson);
-          const transformedData = await applyResponseTransforms(data, attemptResolved.transformResponse ?? defaults.transformResponse, rawResponse);
+          const data = await parseResponse(
+            rawResponse,
+            attemptResolved.responseType ?? 'json',
+            attemptResolved.maxBodySize,
+            attemptResolved.parseJson,
+            attemptConfig.signal,
+          );
+          let transformedData: unknown;
+          try {
+            transformedData = await applyResponseTransforms(data, attemptResolved.transformResponse ?? defaults.transformResponse, rawResponse);
+          } catch (cause) {
+            throw new HttpError('Response transform failed', {
+              code: 'ERR_TRANSFORM_RESPONSE',
+              config: attemptConfig,
+              cause,
+            });
+          }
           const response: HttpResponse<unknown> = {
             data: transformedData,
             status: rawResponse.status,
@@ -441,11 +500,21 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     };
 
     const cacheSetting = initialResolved.cache ?? defaults.cache;
+    const cacheDeadline = Boolean(initialResolved.signal) || timeoutMs > 0 || totalTimeoutMs > 0;
+    const cachePolicyCompatible = initialResolved.maxBodySize === undefined
+      && !initialResolved.onDownloadProgress
+      && initialResolved.rateLimit === undefined
+      && !initialResolved.parseJson
+      && !initialResolved.transformResponse
+      && !initialResolved.validateStatus
+      && initialResolved.throwHttpErrors === undefined;
     const cacheEnabled = !fullResponse && initialResolved.method === 'GET'
       && !initialResolved.bypassCache
       && cacheSetting !== false
       && cacheSetting !== undefined
-      && initialResolved.responseType !== 'response';
+      && initialResolved.responseType !== 'response'
+      && !cacheDeadline
+      && cachePolicyCompatible;
     const ttl = typeof cacheSetting === 'object' ? Math.max(0, Number(cacheSetting.ttl) || 0) : 0;
     const runScheduled = () => rateLimiter.run(perform, {
       ...(initialResolved.rateLimit ?? {}),
@@ -474,7 +543,21 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
       overallSignal.cleanup();
     }
     } catch (error) {
-      const fallbackConfig = resolved || await createResolvedConfig(defaults, input, requestIdEnabled);
+      let fallbackConfig = resolved;
+      if (!fallbackConfig) {
+        try {
+          fallbackConfig = await createResolvedConfig(defaults, input, requestIdEnabled, false);
+        } catch {
+          fallbackConfig = {
+            ...defaults,
+            ...input,
+            method: String(input.method || 'GET').toUpperCase(),
+            url: input.url || '',
+            headers: mergeHeaders(defaults.headers, input.headers, String(input.method || 'GET').toUpperCase()),
+            body: input.body,
+          };
+        }
+      }
       const normalized = toError(error, fallbackConfig, false, Boolean(input.signal?.aborted));
       notifyError(normalized);
       throw normalized;

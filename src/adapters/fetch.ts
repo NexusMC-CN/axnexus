@@ -40,6 +40,7 @@ export function createFetchAdapter(fetchImpl: typeof globalThis.fetch = globalTh
       total: contentLength(response),
       onProgress: config.onDownloadProgress,
       progressInterval: config.progressInterval,
+      signal: config.signal,
       rateLimiter: config.rateLimiter,
       rateLimit: { ...config.rateLimit, signal: config.signal },
     });

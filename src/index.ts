@@ -20,14 +20,27 @@ export { RateLimiter } from './transfer/rate-limiter.js';
 export type { RateLimitOptions } from './transfer/rate-limiter.js';
 export { createFormData } from './transfer/multipart.js';
 export { GetRequestCache } from './cache/get-cache.js';
+export type { CacheWaitOptions } from './cache/get-cache.js';
 export { ResponseCache } from './cache/response-cache.js';
 export type { ResponseCacheOptions, ResponseCachePolicy } from './cache/response-cache.js';
 export { uploadChunks } from './transfer/chunked.js';
-export type { ChunkUploadPart, ChunkUploadOptions } from './transfer/chunked.js';
+export type {
+  ChunkUploadPart,
+  ChunkUploadOptions,
+  ChunkRetryDelay,
+  ChunkPartErrorContext,
+} from './transfer/chunked.js';
 export { fetchJson, fetchJsonResult } from './server/json.js';
 export type { FetchJsonOptions, FetchJsonResult } from './server/json.js';
 export { createRequestLogger } from './observability/request-logger.js';
-export type { RequestLogRecord, RequestLoggerOptions, RequestStartRecord } from './observability/request-logger.js';
+export type {
+  RequestLogRecord,
+  RequestLoggerOptions,
+  RequestStartRecord,
+  RequestLogger,
+  RequestLogHandle,
+  RequestLifecycleInput,
+} from './observability/request-logger.js';
 export { createFetchAdapter, fetchAdapter } from './adapters/fetch.js';
 export { createXhrAdapter, xhrAdapter } from './adapters/xhr.js';
 export { hasAdapterCapability } from './adapters/types.js';

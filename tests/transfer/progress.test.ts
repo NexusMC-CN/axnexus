@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { ProgressTracker, trackReadableStream } from '../../dist/index.js';
+import { ProgressTracker, RateLimiter, trackReadableStream } from '../../dist/index.js';
 
 test('calculates progress rate and final percent', async () => {
   const events: Array<{ loaded: number; percent?: number }> = [];
@@ -34,4 +34,29 @@ test('tracks bytes through a readable stream', async () => {
   const reader = tracked.getReader();
   while (!(await reader.read()).done) {}
   assert.deepEqual(events, [2, 3]);
+});
+
+test('cancels byte throttling when the tracked stream signal aborts', async () => {
+  const controller = new AbortController();
+  const limiter = new RateLimiter({ bytesPerSecond: 1 });
+  await limiter.consume(1);
+  const stream = new ReadableStream<Uint8Array>({
+    start(source) {
+      source.enqueue(new Uint8Array([1]));
+      source.close();
+    },
+  });
+  const tracked = trackReadableStream(stream, {
+    phase: 'download',
+    rateLimiter: limiter,
+    rateLimit: { bytesPerSecond: 1 },
+    signal: controller.signal,
+  });
+  const reader = tracked.getReader();
+  const pending = reader.read();
+  setTimeout(() => controller.abort(), 5);
+  await assert.rejects(
+    Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(new Error('hung')), 100))]),
+    (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ERR_CANCELED',
+  );
 });
