@@ -5,7 +5,8 @@ export type HttpErrorCode =
   | 'ERR_NETWORK'
   | 'ETIMEDOUT'
   | 'ERR_CANCELED'
-  | 'ERR_BAD_PAYLOAD';
+  | 'ERR_BAD_PAYLOAD'
+  | 'ERR_INVALID_HEADER';
 
 export class HttpError<T = unknown> extends Error {
   readonly code: HttpErrorCode;

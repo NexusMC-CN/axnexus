@@ -10,3 +10,7 @@ export {
 export { appendQuery, resolveURL, serializeParams } from './query.js';
 export { createCsrfInterceptor } from './csrf.js';
 export type { CsrfInterceptor, CsrfInterceptorOptions } from './csrf.js';
+export { AxiosHeaders } from './headers/headers.js';
+export type { HeaderValue, RawHeaders, HeaderMatcher, HeaderRewrite } from './headers/headers.js';
+export { mergeMethodHeaders } from './headers/methods.js';
+export type { HeaderDefaults } from './headers/methods.js';
