@@ -19,6 +19,7 @@ export class GetRequestCache {
   readonly instanceId: string;
   private readonly responseCache = new Map<string, CacheEntry>();
   private readonly inflightRequests = new Map<string, Promise<unknown>>();
+  private generation = 0;
 
   constructor(instanceId: string) {
     this.instanceId = instanceId;
@@ -26,6 +27,7 @@ export class GetRequestCache {
 
   async getOrLoad<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
     const now = Date.now();
+    const generation = this.generation;
     const cached = this.responseCache.get(key);
     if (ttlMs > 0 && cached && cached.expiresAt > now) {
       return cloneValue(cached.value as T);
@@ -36,7 +38,7 @@ export class GetRequestCache {
     if (inflight) return cloneValue(await inflight);
 
     const pending = loader().then((value) => {
-      if (ttlMs > 0) {
+      if (ttlMs > 0 && generation === this.generation) {
         this.responseCache.set(key, {
           expiresAt: Date.now() + ttlMs,
           value: cloneValue(value),
@@ -48,11 +50,13 @@ export class GetRequestCache {
     try {
       return cloneValue(await pending);
     } finally {
-      this.inflightRequests.delete(key);
+      if (this.inflightRequests.get(key) === pending) this.inflightRequests.delete(key);
     }
   }
 
   clear(): void {
+    this.generation += 1;
     this.responseCache.clear();
+    this.inflightRequests.clear();
   }
 }

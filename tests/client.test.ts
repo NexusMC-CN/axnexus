@@ -120,6 +120,28 @@ test('retries idempotent requests and reuses the request id', async () => {
   assert.equal(new Set(requestIds).size, 1);
 });
 
+test('reruns request interceptors for each retry attempt', async () => {
+  let interceptorRuns = 0;
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: 1,
+    retryDelay: 0,
+    adapter: async (config) => {
+      attempts += 1;
+      assert.equal(config.headers.get('x-attempt-marker'), String(attempts));
+      if (attempts === 1) return jsonResponse({ error: 'busy' }, 503);
+      return jsonResponse({ ok: true });
+    },
+  });
+  client.interceptors.request.use((config) => {
+    interceptorRuns += 1;
+    return { ...config, headers: { ...Object.fromEntries(new Headers(config.headers).entries()), 'X-Attempt-Marker': String(interceptorRuns) } };
+  });
+
+  await client.get('/retry-interceptor');
+  assert.equal(interceptorRuns, 2);
+});
+
 test('does not retry unsafe methods unless explicitly enabled', async () => {
   let defaultAttempts = 0;
   const defaultClient = createHttpClient({
@@ -145,6 +167,65 @@ test('does not retry unsafe methods unless explicitly enabled', async () => {
 
   assert.equal(defaultAttempts, 1);
   assert.equal(enabledAttempts, 3);
+});
+
+test('does not retry unsafe methods after a network error by default', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: 2,
+    retryDelay: 0,
+    adapter: async () => {
+      attempts += 1;
+      throw new TypeError('offline');
+    },
+  });
+
+  await assert.rejects(client.post('/unsafe-network', {}));
+  assert.equal(attempts, 1);
+});
+
+test('calls onRequestError once for a failed request', async () => {
+  const errors: HttpError[] = [];
+  const client = createHttpClient({
+    onRequestError: (error) => errors.push(error),
+    adapter: async () => jsonResponse({ error: 'broken' }, 500),
+  });
+
+  await assert.rejects(client.get('/hook-error'));
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].status, 500);
+});
+
+test('keeps the original error when onRequestError throws', async () => {
+  const original = new Error('observer failure');
+  const client = createHttpClient({
+    onRequestError: () => { throw new Error('observer crashed'); },
+    adapter: async () => { throw original; },
+  });
+
+  await assert.rejects(client.get('/observer-error'), (error: unknown) => {
+    assert.equal((error as HttpError).code, 'ERR_NETWORK');
+    assert.equal((error as HttpError).cause, original);
+    return true;
+  });
+});
+
+test('does not cache raw Response objects', async () => {
+  let reads = 0;
+  const client = createHttpClient({
+    cache: { ttl: 1000 },
+    adapter: async () => {
+      reads += 1;
+      return new Response('ok', { status: 200 });
+    },
+  });
+
+  const first = await client.get<Response>('/raw-response', { responseType: 'response' });
+  const second = await client.get<Response>('/raw-response', { responseType: 'response' });
+
+  assert.equal(first instanceof Response, true);
+  assert.equal(second instanceof Response, true);
+  assert.equal(reads, 2);
 });
 
 test('distinguishes external cancellation from timeout', async () => {

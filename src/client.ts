@@ -203,9 +203,9 @@ function toError(
 
 function shouldRetry(error: HttpError, config: ResolvedRequestConfig, retryOn: Set<number>): boolean {
   if (error.isAbort) return false;
+  if (!IDEMPOTENT_METHODS.has(config.method) && !config.retryUnsafeMethods) return false;
   if (error.isTimeout || error.code === 'ERR_NETWORK') return true;
   if (error.code !== 'ERR_BAD_RESPONSE' || error.status === undefined) return false;
-  if (!IDEMPOTENT_METHODS.has(config.method) && !config.retryUnsafeMethods) return false;
   return retryOn.has(error.status);
 }
 
@@ -221,22 +221,48 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const cache = new GetRequestCache(createRequestId());
 
   const request = async <T>(input: RequestConfig): Promise<T> => {
-    const intercepted = await applyInterceptorChain(requestInterceptors, { ...input });
-    const resolved = createResolvedConfig(defaults, intercepted, defaults.requestId ?? true);
-    const maxRetries = normalizeRetryCount(resolved.retry ?? defaults.retry);
-    const retryOn = new Set((resolved.retryOn ?? defaults.retryOn ?? DEFAULT_RETRY_ON).filter(Number.isFinite));
-    const retryUnsafeMethods = resolved.retryUnsafeMethods ?? defaults.retryUnsafeMethods ?? false;
-    resolved.retryUnsafeMethods = retryUnsafeMethods;
-    const timeoutMs = normalizeTimeout(resolved.timeout ?? defaults.timeout);
-    const retryDelay = resolved.retryDelay ?? defaults.retryDelay ?? 0;
+    let resolved: ResolvedRequestConfig | undefined;
+    let notified = false;
+    const notifyError = (error: HttpError) => {
+      if (notified) return;
+      notified = true;
+      try {
+        defaults.onRequestError?.(error);
+      } catch {
+        // Observers must never replace the request error.
+      }
+    };
+    const initialHeaders = mergeHeaders(defaults.headers, input.headers);
+    const requestIdEnabled = defaults.requestId ?? true;
+    const stableRequestId = requestIdEnabled
+      ? (initialHeaders.get('X-Request-Id') || (typeof requestIdEnabled === 'function' ? requestIdEnabled() : createRequestId()))
+      : '';
+    if (stableRequestId && !initialHeaders.has('X-Request-Id')) initialHeaders.set('X-Request-Id', stableRequestId);
+    try {
+      const intercepted = await applyInterceptorChain(requestInterceptors, { ...input, headers: initialHeaders });
+      resolved = createResolvedConfig(defaults, intercepted, false);
+      if (stableRequestId && !resolved.headers.has('X-Request-Id')) resolved.headers.set('X-Request-Id', stableRequestId);
+    const initialResolved = resolved;
+    const maxRetries = normalizeRetryCount(initialResolved.retry ?? defaults.retry);
+    const retryOn = new Set((initialResolved.retryOn ?? defaults.retryOn ?? DEFAULT_RETRY_ON).filter(Number.isFinite));
+    const retryUnsafeMethods = initialResolved.retryUnsafeMethods ?? defaults.retryUnsafeMethods ?? false;
+    initialResolved.retryUnsafeMethods = retryUnsafeMethods;
+    const timeoutMs = normalizeTimeout(initialResolved.timeout ?? defaults.timeout);
+    const retryDelay = initialResolved.retryDelay ?? defaults.retryDelay ?? 0;
     const perform = async (): Promise<T> => {
       let lastError: HttpError | undefined;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-        const externalSignal = resolved.signal;
+        if (attempt > 0) {
+          const retryInput = await applyInterceptorChain(requestInterceptors, { ...input, headers: new Headers(initialHeaders) });
+          resolved = createResolvedConfig(defaults, retryInput, false);
+          if (stableRequestId && !resolved.headers.has('X-Request-Id')) resolved.headers.set('X-Request-Id', stableRequestId);
+        }
+        const attemptResolved: ResolvedRequestConfig = resolved || initialResolved;
+        const externalSignal = attemptResolved.signal;
         if (externalSignal?.aborted) {
           throw new HttpError('Request canceled', {
             code: 'ERR_CANCELED',
-            config: resolved,
+            config: attemptResolved,
             isAbort: true,
           });
         }
@@ -252,7 +278,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           }, timeoutMs);
         }
         const attemptConfig: ResolvedRequestConfig = {
-          ...resolved,
+          ...attemptResolved,
           signal: controller?.signal,
         };
         try {
@@ -275,7 +301,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
               retryable: retryOn.has(rawResponse.status),
             });
           }
-          const data = await parseResponse(rawResponse, resolved.responseType ?? 'json');
+          const data = await parseResponse(rawResponse, attemptResolved.responseType ?? 'json');
           const response: HttpResponse<unknown> = {
             data,
             status: rawResponse.status,
@@ -291,7 +317,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
             error,
             attemptConfig,
             timeoutTriggered,
-            Boolean(resolved.signal?.aborted),
+            Boolean(attemptResolved.signal?.aborted),
           );
           lastError = normalized;
           if (attempt >= maxRetries || !shouldRetry(normalized, attemptConfig, retryOn)) throw normalized;
@@ -304,15 +330,25 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           if (externalSignal && controller) externalSignal.removeEventListener('abort', onAbort);
         }
       }
-      throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: resolved });
+      throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: initialResolved });
     };
 
-    const cacheSetting = resolved.cache ?? defaults.cache;
-    const cacheEnabled = resolved.method === 'GET' && !resolved.bypassCache && cacheSetting !== false;
+    const cacheSetting = initialResolved.cache ?? defaults.cache;
+    const cacheEnabled = initialResolved.method === 'GET'
+      && !initialResolved.bypassCache
+      && cacheSetting !== false
+      && cacheSetting !== undefined
+      && initialResolved.responseType !== 'response';
     const ttl = typeof cacheSetting === 'object' ? Math.max(0, Number(cacheSetting.ttl) || 0) : 0;
-    const result = cacheEnabled ? await cache.getOrLoad(cacheKey(resolved), ttl, perform) : await perform();
-    if (resolved.method !== 'GET') cache.clear();
+    const result = cacheEnabled ? await cache.getOrLoad(cacheKey(initialResolved), ttl, perform) : await perform();
+    if (initialResolved.method !== 'GET') cache.clear();
     return result;
+    } catch (error) {
+      const fallbackConfig = resolved || createResolvedConfig(defaults, input, requestIdEnabled);
+      const normalized = toError(error, fallbackConfig, false, Boolean(input.signal?.aborted));
+      notifyError(normalized);
+      throw normalized;
+    }
   };
 
   const client: HttpClient = {
