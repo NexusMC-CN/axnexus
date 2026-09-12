@@ -41,7 +41,7 @@ export function createFetchAdapter(): HttpAdapterFactory {
       onProgress: config.onDownloadProgress,
       progressInterval: config.progressInterval,
       rateLimiter: config.rateLimiter,
-      rateLimit: config.rateLimit,
+      rateLimit: { ...config.rateLimit, signal: config.signal },
     });
     const wrapped = new Response(body, {
       status: response.status,

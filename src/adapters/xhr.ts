@@ -37,6 +37,10 @@ export function createXhrAdapter(): HttpAdapterFactory {
     };
     const finish = () => {
       if (settled || xhr.readyState !== 4) return;
+      if (xhr.status === 0) {
+        fail(new HttpError('Network request failed', { code: 'ERR_NETWORK', retryable: true }));
+        return;
+      }
       settled = true;
       cleanup();
       uploadTracker?.complete();
@@ -44,7 +48,7 @@ export function createXhrAdapter(): HttpAdapterFactory {
       const body = xhr.responseType === 'arraybuffer' ? xhr.response : (xhr.response ?? xhr.responseText ?? '');
       const status = xhr.status === 1223 ? 204 : xhr.status;
       resolve(new Response(body, {
-        status: status || 200,
+        status,
         statusText: xhr.statusText || '',
         headers: parseResponseHeaders(xhr.getAllResponseHeaders?.() || ''),
       }));

@@ -27,6 +27,7 @@ interface LimitState {
   requestTimes: number[];
   byteTokens: number;
   byteUpdatedAt: number;
+  byteRate: number;
 }
 
 export class RateLimiter {
@@ -76,8 +77,14 @@ export class RateLimiter {
     let remaining = Math.max(0, Number(bytes) || 0);
     if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0 || remaining === 0) return;
     const key = merged.resourceGroup || '__global__';
-    const state = this.states.get(key) ?? { active: 0, requestTimes: [], byteTokens: bytesPerSecond, byteUpdatedAt: Date.now() };
+    const now = Date.now();
+    const state = this.states.get(key) ?? { active: 0, requestTimes: [], byteTokens: bytesPerSecond, byteUpdatedAt: now, byteRate: bytesPerSecond };
     this.states.set(key, state);
+    if (state.byteRate !== bytesPerSecond) {
+      state.byteRate = bytesPerSecond;
+      state.byteTokens = bytesPerSecond;
+      state.byteUpdatedAt = now;
+    }
     while (true) {
       const now = Date.now();
       const elapsed = Math.max(0, now - state.byteUpdatedAt) / 1000;
@@ -121,7 +128,8 @@ export class RateLimiter {
           const candidate = this.queue[index];
           if (candidate.settled) continue;
           const key = candidate.options.resourceGroup || '__global__';
-          const state = this.states.get(key) ?? { active: 0, requestTimes: [], byteTokens: 0, byteUpdatedAt: Date.now() };
+          const byteRate = Math.max(0, Number(candidate.options.bytesPerSecond ?? this.defaults.bytesPerSecond) || 0);
+          const state = this.states.get(key) ?? { active: 0, requestTimes: [], byteTokens: byteRate, byteUpdatedAt: Date.now(), byteRate };
           this.states.set(key, state);
           const limit = Math.max(1, Math.floor(Number(candidate.options.maxConcurrent ?? this.defaults.maxConcurrent) || Infinity));
           if (state.active >= limit) continue;

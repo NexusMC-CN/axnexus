@@ -42,3 +42,11 @@ test('consumes bytes through a token bucket', async () => {
   await limiter.consume(1100);
   assert.equal(Date.now() - started >= 80, true);
 });
+
+test('keeps an initial byte burst after a request task initializes the group', async () => {
+  const limiter = new RateLimiter({ maxConcurrent: 1, bytesPerSecond: 1000 });
+  await limiter.run(() => undefined);
+  const started = Date.now();
+  await limiter.consume(500);
+  assert.equal(Date.now() - started < 80, true);
+});

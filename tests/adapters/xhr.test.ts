@@ -81,3 +81,34 @@ test('xhr adapter maps binary response type and credentials', async () => {
     globalThis.XMLHttpRequest = original;
   }
 });
+
+test('xhr adapter treats status zero as a network error', async () => {
+  class FailedXHR {
+    upload = {};
+    onreadystatechange: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    ontimeout: (() => void) | null = null;
+    readyState = 0;
+    status = 0;
+    statusText = '';
+    responseType = '';
+    response = '';
+    open() { this.readyState = 1; }
+    setRequestHeader() {}
+    getAllResponseHeaders() { return ''; }
+    send() { this.readyState = 4; this.onreadystatechange?.(); }
+    abort() { this.onabort?.(); }
+  }
+  const original = globalThis.XMLHttpRequest;
+  globalThis.XMLHttpRequest = FailedXHR as never;
+  try {
+    await assert.rejects(
+      createXhrAdapter()({ url: 'https://example.test', method: 'GET', headers: new Headers() } as never),
+      (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ERR_NETWORK',
+    );
+  } finally {
+    globalThis.XMLHttpRequest = original;
+  }
+});
