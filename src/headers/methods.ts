@@ -15,7 +15,7 @@ export interface HeaderDefaults {
 export function mergeMethodHeaders(
   defaults: HeaderDefaults | AxiosHeaders | Headers | undefined,
   method: string,
-  request: RawHeaders | Headers | AxiosHeaders | undefined,
+  request: RawHeaders | Headers | AxiosHeaders | HeadersInit | undefined,
   rewrite: HeaderRewrite = true,
 ): AxiosHeaders {
   const result = new AxiosHeaders();

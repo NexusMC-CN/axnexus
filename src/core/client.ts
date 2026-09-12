@@ -4,7 +4,10 @@ import { applyInterceptorChain, createInterceptorManager } from './interceptors.
 import { appendQuery, resolveURL } from '../query.js';
 import { fetchAdapter } from '../adapters/fetch.js';
 import { readErrorPayload, readResponse } from '../utils/response.js';
+import { AxiosHeaders } from '../headers/headers.js';
+import { mergeMethodHeaders, type HeaderDefaults } from '../headers/methods.js';
 import type {
+  AdapterResult,
   HttpAdapter,
   HttpClient,
   HttpClientConfig,
@@ -12,6 +15,7 @@ import type {
   RequestConfig,
   ResolvedRequestConfig,
   ResponseType,
+  ResponseTimings,
 } from './types.js';
 
 const DEFAULT_RETRY_ON = [408, 429, 500, 502, 503, 504];
@@ -24,32 +28,25 @@ function createRequestId(): string {
   return `axnexus-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function isPlainBody(value: unknown): boolean {
-  if (typeof value === 'string') return false;
-  if (value === null || typeof value !== 'object') return true;
-  if (typeof FormData !== 'undefined' && value instanceof FormData) return false;
-  if (typeof Blob !== 'undefined' && value instanceof Blob) return false;
-  if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer) return false;
-  if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value)) return false;
-  if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) return false;
-  if (typeof ReadableStream !== 'undefined' && value instanceof ReadableStream) return false;
-  return true;
-}
-
 function encodeBody(config: RequestConfig, headers: Headers): BodyInit | null | undefined {
   if (!Object.prototype.hasOwnProperty.call(config, 'data')) return config.body;
-  if (!isPlainBody(config.data)) return config.data as BodyInit;
+  if (config.data === undefined || typeof config.data === 'string') return config.data as BodyInit;
+  if (config.data === null || typeof config.data !== 'object') {
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    return JSON.stringify(config.data);
+  }
+  if (typeof FormData !== 'undefined' && config.data instanceof FormData) return config.data;
+  if (typeof Blob !== 'undefined' && config.data instanceof Blob) return config.data;
+  if (typeof ArrayBuffer !== 'undefined' && (config.data instanceof ArrayBuffer || ArrayBuffer.isView(config.data))) return config.data as BodyInit;
+  if (typeof URLSearchParams !== 'undefined' && config.data instanceof URLSearchParams) return config.data;
+  if (typeof ReadableStream !== 'undefined' && config.data instanceof ReadableStream) return config.data;
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   return JSON.stringify(config.data);
 }
 
-function mergeHeaders(...sources: Array<HeadersInit | undefined>): Headers {
-  const headers = new Headers();
-  for (const source of sources) {
-    if (!source) continue;
-    new Headers(source).forEach((value, key) => headers.set(key, value));
-  }
-  return headers;
+function mergeHeaders(defaults: unknown, request: unknown, method: string): Headers {
+  const merged = mergeMethodHeaders(defaults as HeaderDefaults | undefined, method, request as never);
+  return new Headers(merged.toJSON(true) as HeadersInit);
 }
 
 function normalizeRetryCount(value: number | undefined): number {
@@ -106,7 +103,7 @@ function createResolvedConfig(
     resolveURL(baseURL, request.url || '', allowAbsoluteURL),
     request.params,
   );
-  const headers = mergeHeaders(defaults.headers, request.headers);
+  const headers = mergeHeaders(defaults.headers, request.headers, method);
   if (!headers.has('Accept')) headers.set('Accept', 'application/json');
   if (requestIdEnabled && !headers.has('X-Request-Id')) {
     headers.set('X-Request-Id', typeof requestIdEnabled === 'function' ? requestIdEnabled() : createRequestId());
@@ -187,7 +184,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const responseInterceptors = createInterceptorManager<HttpResponse<unknown>>();
   const cache = new GetRequestCache(createRequestId());
 
-  const request = async <T>(input: RequestConfig): Promise<T> => {
+  const requestInternal = async <T>(input: RequestConfig, fullResponse: boolean): Promise<T | HttpResponse<T>> => {
     let resolved: ResolvedRequestConfig | undefined;
     let notified = false;
     const notifyError = (error: HttpError) => {
@@ -199,7 +196,8 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
         // Observers must never replace the request error.
       }
     };
-    const initialHeaders = mergeHeaders(defaults.headers, input.headers);
+    const initialMethod = String(input.method || 'GET').toUpperCase();
+    const initialHeaders = mergeHeaders(defaults.headers, input.headers, initialMethod);
     const requestIdEnabled = defaults.requestId ?? true;
     const stableRequestId = requestIdEnabled
       ? (initialHeaders.get('X-Request-Id') || (typeof requestIdEnabled === 'function' ? requestIdEnabled() : createRequestId()))
@@ -216,7 +214,8 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     initialResolved.retryUnsafeMethods = retryUnsafeMethods;
     const timeoutMs = normalizeTimeout(initialResolved.timeout ?? defaults.timeout);
     const retryDelay = initialResolved.retryDelay ?? defaults.retryDelay ?? 0;
-    const perform = async (): Promise<T> => {
+    const queuedAt = Date.now();
+    const perform = async (): Promise<HttpResponse<unknown>> => {
       let lastError: HttpError | undefined;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         if (attempt > 0) {
@@ -248,17 +247,32 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           ...attemptResolved,
           signal: controller?.signal,
         };
+        const startedAt = Date.now();
         try {
-          const rawResponse = await adapter(attemptConfig);
+          const adapterOutput = await adapter(attemptConfig);
+          const rawResponse = adapterOutput instanceof Response
+            ? adapterOutput
+            : (adapterOutput as AdapterResult).response;
+          const metadata = adapterOutput instanceof Response ? undefined : (adapterOutput as AdapterResult).metadata;
+          const headersAt = Date.now();
           if (!rawResponse.ok) {
             const payload = await readResponsePayload(rawResponse);
             const response: HttpResponse<unknown> = {
               data: payload,
               status: rawResponse.status,
               statusText: rawResponse.statusText,
-              headers: rawResponse.headers,
+              headers: new AxiosHeaders(rawResponse.headers),
               config: attemptConfig,
               raw: rawResponse,
+              protocol: metadata?.protocol ?? 'unknown',
+              timings: {
+                queuedAt,
+                startedAt,
+                headersAt,
+                completedAt: Date.now(),
+                duration: Date.now() - queuedAt,
+                ...metadata?.timings,
+              },
             };
             throw new HttpError(responseMessage(payload, rawResponse.status), {
               code: 'ERR_BAD_RESPONSE',
@@ -273,12 +287,22 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
             data,
             status: rawResponse.status,
             statusText: rawResponse.statusText,
-            headers: rawResponse.headers,
+            headers: new AxiosHeaders(rawResponse.headers),
             config: attemptConfig,
             raw: rawResponse,
+            protocol: metadata?.protocol ?? 'unknown',
+            timings: {
+              queuedAt,
+              startedAt,
+              headersAt,
+              completedAt: Date.now(),
+              duration: Date.now() - queuedAt,
+              downloadDuration: Date.now() - headersAt,
+              ...metadata?.timings,
+            },
           };
           const transformed = await applyInterceptorChain(responseInterceptors, response, { reverse: true });
-          return transformed.data as T;
+          return transformed;
         } catch (error) {
           const normalized = toError(
             error,
@@ -301,15 +325,18 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     };
 
     const cacheSetting = initialResolved.cache ?? defaults.cache;
-    const cacheEnabled = initialResolved.method === 'GET'
+    const cacheEnabled = !fullResponse && initialResolved.method === 'GET'
       && !initialResolved.bypassCache
       && cacheSetting !== false
       && cacheSetting !== undefined
       && initialResolved.responseType !== 'response';
     const ttl = typeof cacheSetting === 'object' ? Math.max(0, Number(cacheSetting.ttl) || 0) : 0;
-    const result = cacheEnabled ? await cache.getOrLoad(cacheKey(initialResolved), ttl, perform) : await perform();
+    const result = cacheEnabled
+      ? await cache.getOrLoad(cacheKey(initialResolved), ttl, async () => (await perform()).data)
+      : await perform();
     if (initialResolved.method !== 'GET') cache.clear();
-    return result;
+    if (fullResponse) return result as HttpResponse<T>;
+    return cacheEnabled ? result as T : (result as HttpResponse<T>).data;
     } catch (error) {
       const fallbackConfig = resolved || createResolvedConfig(defaults, input, requestIdEnabled);
       const normalized = toError(error, fallbackConfig, false, Boolean(input.signal?.aborted));
@@ -318,13 +345,22 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     }
   };
 
+  const request = <T>(input: RequestConfig): Promise<T> => requestInternal<T>(input, false) as Promise<T>;
+  const requestResponse = <T>(input: RequestConfig): Promise<HttpResponse<T>> => requestInternal<T>(input, true) as Promise<HttpResponse<T>>;
+
   const client: HttpClient = {
     request,
+    requestResponse,
     get: (url, config = {}) => request({ ...config, url, method: 'GET' }),
+    getResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'GET' }),
     post: (url, data, config = {}) => request({ ...config, url, method: 'POST', data }),
+    postResponse: (url, data, config = {}) => requestResponse({ ...config, url, method: 'POST', data }),
     put: (url, data, config = {}) => request({ ...config, url, method: 'PUT', data }),
+    putResponse: (url, data, config = {}) => requestResponse({ ...config, url, method: 'PUT', data }),
     patch: (url, data, config = {}) => request({ ...config, url, method: 'PATCH', data }),
+    patchResponse: (url, data, config = {}) => requestResponse({ ...config, url, method: 'PATCH', data }),
     delete: (url, config = {}) => request({ ...config, url, method: 'DELETE' }),
+    deleteResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'DELETE' }),
     clearCache: () => cache.clear(),
     interceptors: {
       request: requestInterceptors,

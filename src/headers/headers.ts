@@ -40,7 +40,7 @@ function matches(matcher: HeaderMatcher | undefined, value: string, name: string
 export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   private readonly values = new Map<string, { name: string; value: HeaderValue }>();
 
-  constructor(headers?: RawHeaders | Headers | AxiosHeaders | string) {
+  constructor(headers?: RawHeaders | Headers | AxiosHeaders | HeadersInit | string) {
     if (!headers) return;
     if (headers instanceof AxiosHeaders) {
       for (const [name, value] of headers) this.set(name, value);
@@ -53,16 +53,16 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
       }
       return;
     }
-    if (headers instanceof Headers) {
-      headers.forEach((value, name) => this.set(name, value));
+    if (headers instanceof Headers || Array.isArray(headers)) {
+      new Headers(headers).forEach((value, name) => this.set(name, value));
     } else {
       for (const [name, value] of Object.entries(headers)) this.set(name, value);
     }
   }
 
   set(name: string, value: HeaderValue, rewrite?: HeaderRewrite): this;
-  set(headers: RawHeaders | Headers | AxiosHeaders, rewrite?: HeaderRewrite): this;
-  set(nameOrHeaders: string | RawHeaders | Headers | AxiosHeaders, valueOrRewrite?: HeaderValue | HeaderRewrite, rewrite: HeaderRewrite = true): this {
+  set(headers: RawHeaders | Headers | AxiosHeaders | HeadersInit, rewrite?: HeaderRewrite): this;
+  set(nameOrHeaders: string | RawHeaders | Headers | AxiosHeaders | HeadersInit, valueOrRewrite?: HeaderValue | HeaderRewrite, rewrite: HeaderRewrite = true): this {
     if (typeof nameOrHeaders !== 'string') {
       const target = new AxiosHeaders(nameOrHeaders);
       for (const [name, value] of target) this.set(name, value, valueOrRewrite as HeaderRewrite ?? true);
