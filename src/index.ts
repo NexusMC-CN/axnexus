@@ -8,3 +8,5 @@ export {
   createInterceptorManager,
 } from './interceptors.js';
 export { appendQuery, resolveURL, serializeParams } from './query.js';
+export { createCsrfInterceptor } from './csrf.js';
+export type { CsrfInterceptor, CsrfInterceptorOptions } from './csrf.js';
