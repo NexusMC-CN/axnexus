@@ -6,10 +6,10 @@ function contentLength(response: Response): number | undefined {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-export function createFetchAdapter(): HttpAdapterFactory {
+export function createFetchAdapter(fetchImpl: typeof globalThis.fetch = globalThis.fetch): HttpAdapterFactory {
   return async (config: AdapterConfig) => {
     const startedAt = Date.now();
-    const response = await fetch(config.url, {
+    const response = await fetchImpl(config.url, {
       method: config.method,
       headers: config.headers,
       body: config.body,

@@ -201,11 +201,10 @@ src/
     methods.ts         method shortcut 和 defaults 合并
     presets.ts         可复用安全 header preset
   transfer/
-    upload.ts          上传体、上传进度和上传限速
-    download.ts        下载流、下载进度和下载限速
     progress.ts        TransferProgress 计算和节流
     rate-limiter.ts    token bucket、队列和并发调度
     multipart.ts       FormData/multipart 辅助
+    chunked.ts         有界并发分块上传编排
   adapters/
     fetch.ts           默认 Fetch adapter
     xhr.ts             浏览器 XHR adapter
@@ -214,6 +213,11 @@ src/
     types.ts           adapter 能力和 transport 类型
   cache/
     get-cache.ts       GET TTL 缓存和 inflight 去重
+    response-cache.ts  stale-while-revalidate 响应缓存
+  server/
+    json.ts            SSR/middleware JSON helper
+  observability/
+    request-logger.ts  请求生命周期记录和 header 脱敏
   security/
     csrf.ts            可选 CSRF interceptor
     header-sanitizer.ts header 名称和值校验
@@ -221,6 +225,7 @@ src/
     query.ts           params 序列化
     body.ts            请求体编码
     response.ts        响应解析和大小限制
+    signal.ts          AbortSignal 组合和清理
   index.ts             稳定公共导出
 tests/
   core/
@@ -230,7 +235,7 @@ tests/
   cache/
 ```
 
-目录迁移必须保持已有根入口的兼容导出。内部模块不能反向导入 `index.ts`，避免循环依赖；Node adapter 不能被默认入口静态导入，以保证浏览器 bundler 不解析 Node 内置模块。
+当前包尚未发布，目录迁移不再保留旧根模块的兼容 re-export；稳定公共入口统一由 `index.ts` 提供。内部模块不能反向导入 `index.ts`，避免循环依赖；Node adapter 不能被默认入口静态导入，以保证浏览器 bundler 不解析 Node 内置模块。
 
 ## 错误和安全边界
 

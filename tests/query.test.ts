@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveURL, serializeParams } from '../dist/query.js';
+import { resolveURL, serializeParams } from '../dist/utils/query.js';
 
 test('serializes scalar, repeated array and omits empty params', () => {
   assert.equal(

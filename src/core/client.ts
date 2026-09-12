@@ -1,4 +1,4 @@
-import { GetRequestCache } from '../cache.js';
+import { GetRequestCache } from '../cache/get-cache.js';
 import { HttpError } from './errors.js';
 import { applyInterceptorChain, createInterceptorManager } from './interceptors.js';
 import { appendQuery, resolveURL } from '../utils/query.js';
@@ -7,6 +7,8 @@ import { readErrorPayload, readResponse } from '../utils/response.js';
 import { AxiosHeaders } from '../headers/headers.js';
 import { mergeMethodHeaders, type HeaderDefaults } from '../headers/methods.js';
 import { RateLimiter } from '../transfer/rate-limiter.js';
+import { encodeBody } from '../utils/body.js';
+import { combineSignals } from '../utils/signal.js';
 import type {
   AdapterResult,
   HttpAdapter,
@@ -14,6 +16,8 @@ import type {
   HttpClientConfig,
   HttpResponse,
   RequestConfig,
+  RetryContext,
+  RetryOptions,
   ResolvedRequestConfig,
   ResponseType,
   ResponseTimings,
@@ -29,38 +33,55 @@ function createRequestId(): string {
   return `axnexus-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function encodeBody(config: RequestConfig, headers: Headers): BodyInit | null | undefined {
-  if (!Object.prototype.hasOwnProperty.call(config, 'data')) return config.body;
-  if (config.data === undefined || typeof config.data === 'string') return config.data as BodyInit;
-  if (config.data === null || typeof config.data !== 'object') {
-    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-    return JSON.stringify(config.data);
-  }
-  if (typeof FormData !== 'undefined' && config.data instanceof FormData) return config.data;
-  if (typeof Blob !== 'undefined' && config.data instanceof Blob) return config.data;
-  if (typeof ArrayBuffer !== 'undefined' && (config.data instanceof ArrayBuffer || ArrayBuffer.isView(config.data))) return config.data as BodyInit;
-  if (typeof URLSearchParams !== 'undefined' && config.data instanceof URLSearchParams) return config.data;
-  if (typeof ReadableStream !== 'undefined' && config.data instanceof ReadableStream) return config.data;
-  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  return JSON.stringify(config.data);
-}
-
 function mergeHeaders(defaults: unknown, request: unknown, method: string): Headers {
   const merged = mergeMethodHeaders(defaults as HeaderDefaults | undefined, method, request as never);
   return new Headers(merged.toJSON(true) as HeadersInit);
 }
 
-function normalizeRetryCount(value: number | undefined): number {
-  return Math.max(0, Math.floor(Number(value) || 0));
+function normalizeRetry(value: number | RetryOptions | undefined, fallback: number | RetryOptions | undefined): RetryOptions {
+  const selected = value ?? fallback;
+  if (typeof selected === 'number') return { limit: Math.max(0, Math.floor(Number(selected) || 0)) };
+  if (selected && typeof selected === 'object') return { ...selected, limit: Math.max(0, Math.floor(Number(selected.limit) || 0)) };
+  return { limit: 0 };
 }
 
 function normalizeTimeout(value: number | undefined): number {
   return Number.isFinite(value) && Number(value) > 0 ? Number(value) : 0;
 }
 
-function sleep(ms: number): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('The operation was aborted', 'AbortError'));
+    };
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+  });
+}
+
+async function applyRequestTransforms(value: unknown, transforms: RequestConfig['transformRequest'], headers: Headers): Promise<unknown> {
+  const list = transforms ? (Array.isArray(transforms) ? transforms : [transforms]) : [];
+  let current = value;
+  for (const transform of list) current = await transform(current, headers);
+  return current;
+}
+
+async function applyResponseTransforms(value: unknown, transforms: RequestConfig['transformResponse'], response: Response): Promise<unknown> {
+  const list = transforms ? (Array.isArray(transforms) ? transforms : [transforms]) : [];
+  let current = value;
+  for (const transform of list) current = await transform(current, response);
+  return current;
 }
 
 function cacheKey(config: ResolvedRequestConfig): string {
@@ -80,23 +101,46 @@ function responseMessage(payload: unknown, status: number): string {
   return `Request failed with HTTP ${status}`;
 }
 
+function retryAfterMs(response: HttpResponse<unknown> | undefined): number | undefined {
+  const raw = response?.headers.get('retry-after');
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const seconds = Number(raw.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp)) return undefined;
+  return Math.max(0, timestamp - Date.now());
+}
+
+function statusShouldThrow(config: ResolvedRequestConfig, status: number): boolean {
+  if (typeof config.validateStatus === 'function') return !config.validateStatus(status);
+  const policy = config.throwHttpErrors;
+  if (typeof policy === 'function') return policy(status);
+  if (policy === false) return false;
+  return !(status >= 200 && status < 300);
+}
+
 async function readResponsePayload(response: Response): Promise<unknown> {
   return readErrorPayload(response);
 }
 
-async function parseResponse(response: Response, type: ResponseType, maxBodySize?: number): Promise<unknown> {
-  return readResponse(response, type, maxBodySize);
+async function parseResponse(
+  response: Response,
+  type: ResponseType,
+  maxBodySize: number | undefined,
+  parseJson: RequestConfig['parseJson'],
+): Promise<unknown> {
+  return readResponse(response, type, maxBodySize, parseJson);
 }
 
 function buildFetchAdapter(): HttpAdapter {
   return fetchAdapter;
 }
 
-function createResolvedConfig(
+async function createResolvedConfig(
   defaults: HttpClientConfig,
   request: RequestConfig,
   requestIdEnabled: boolean | (() => string),
-): ResolvedRequestConfig {
+): Promise<ResolvedRequestConfig> {
   const method = String(request.method || 'GET').toUpperCase();
   const baseURL = request.baseURL ?? defaults.baseURL ?? '';
   const allowAbsoluteURL = request.allowAbsoluteURL ?? defaults.allowAbsoluteURL ?? true;
@@ -109,7 +153,12 @@ function createResolvedConfig(
   if (requestIdEnabled && !headers.has('X-Request-Id')) {
     headers.set('X-Request-Id', typeof requestIdEnabled === 'function' ? requestIdEnabled() : createRequestId());
   }
-  const body = encodeBody(request, headers);
+  const requestTransforms = request.transformRequest ?? defaults.transformRequest;
+  const transformedData = Object.prototype.hasOwnProperty.call(request, 'data')
+    ? await applyRequestTransforms(request.data, requestTransforms, headers)
+    : request.data;
+  const stringifyJson = request.stringifyJson ?? defaults.stringifyJson ?? JSON.stringify;
+  const body = encodeBody(transformedData, request.body, headers, stringifyJson);
   return {
     ...defaults,
     ...request,
@@ -166,12 +215,29 @@ function toError(
   });
 }
 
-function shouldRetry(error: HttpError, config: ResolvedRequestConfig, retryOn: Set<number>): boolean {
+async function shouldRetry(
+  error: HttpError,
+  config: ResolvedRequestConfig,
+  retry: RetryOptions,
+  retryOn: Set<number>,
+  retryCount: number,
+): Promise<boolean> {
   if (error.isAbort) return false;
-  if (!IDEMPOTENT_METHODS.has(config.method) && !config.retryUnsafeMethods) return false;
-  if (error.isTimeout || error.code === 'ERR_NETWORK') return true;
-  if (error.code !== 'ERR_BAD_RESPONSE' || error.status === undefined) return false;
-  return retryOn.has(error.status);
+  if (typeof retry.shouldRetry === 'function') {
+    return retry.shouldRetry({ error, retryCount, delay: 0 });
+  }
+  const methods = new Set((retry.methods ?? []).map((method) => method.toUpperCase()));
+  const methodAllowed = methods.size > 0
+    ? methods.has(config.method)
+    : IDEMPOTENT_METHODS.has(config.method) || Boolean(config.retryUnsafeMethods);
+  if (!methodAllowed) return false;
+  const errorCodes = new Set(retry.errorCodes ?? []);
+  const defaultDecision = error.isTimeout || error.code === 'ERR_NETWORK'
+    ? true
+    : error.code === 'ERR_BAD_RESPONSE' && error.status !== undefined
+      ? (retry.statusCodes ? retry.statusCodes.includes(error.status) : retryOn.has(error.status))
+      : errorCodes.has(error.code);
+  return defaultDecision;
 }
 
 export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
@@ -207,22 +273,33 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     if (stableRequestId && !initialHeaders.has('X-Request-Id')) initialHeaders.set('X-Request-Id', stableRequestId);
     try {
       const intercepted = await applyInterceptorChain(requestInterceptors, { ...input, headers: initialHeaders });
-      resolved = createResolvedConfig(defaults, intercepted, false);
+      resolved = await createResolvedConfig(defaults, intercepted, false);
       if (stableRequestId && !resolved.headers.has('X-Request-Id')) resolved.headers.set('X-Request-Id', stableRequestId);
     const initialResolved = resolved;
-    const maxRetries = normalizeRetryCount(initialResolved.retry ?? defaults.retry);
-    const retryOn = new Set((initialResolved.retryOn ?? defaults.retryOn ?? DEFAULT_RETRY_ON).filter(Number.isFinite));
+    const retry = normalizeRetry(initialResolved.retry, defaults.retry);
+    const maxRetries = retry.limit ?? 0;
+    const retryOn = new Set((initialResolved.retryOn ?? defaults.retryOn ?? retry.statusCodes ?? DEFAULT_RETRY_ON).filter(Number.isFinite));
     const retryUnsafeMethods = initialResolved.retryUnsafeMethods ?? defaults.retryUnsafeMethods ?? false;
     initialResolved.retryUnsafeMethods = retryUnsafeMethods;
     const timeoutMs = normalizeTimeout(initialResolved.timeout ?? defaults.timeout);
-    const retryDelay = initialResolved.retryDelay ?? defaults.retryDelay ?? 0;
+    const retryDelay = initialResolved.retryDelay ?? defaults.retryDelay ?? retry.delay ?? 0;
+    const totalTimeoutMs = normalizeTimeout(initialResolved.totalTimeout ?? defaults.totalTimeout);
     const queuedAt = Date.now();
+    const totalController = totalTimeoutMs > 0 ? new AbortController() : null;
+    const overallSignal = combineSignals([initialResolved.signal, totalController?.signal]);
+    let totalTimeoutTriggered = false;
+    const totalTimer = totalController
+      ? setTimeout(() => {
+        totalTimeoutTriggered = true;
+        totalController.abort();
+      }, totalTimeoutMs)
+      : undefined;
     const perform = async (): Promise<HttpResponse<unknown>> => {
       let lastError: HttpError | undefined;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         if (attempt > 0) {
           const retryInput = await applyInterceptorChain(requestInterceptors, { ...input, headers: new Headers(initialHeaders) });
-          resolved = createResolvedConfig(defaults, retryInput, false);
+          resolved = await createResolvedConfig(defaults, retryInput, false);
           if (stableRequestId && !resolved.headers.has('X-Request-Id')) resolved.headers.set('X-Request-Id', stableRequestId);
         }
         const attemptResolved: ResolvedRequestConfig = resolved || initialResolved;
@@ -234,11 +311,13 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
             isAbort: true,
           });
         }
-        const controller = externalSignal || timeoutMs > 0 ? new AbortController() : null;
+        const controller = externalSignal || timeoutMs > 0 || totalController ? new AbortController() : null;
         let timeoutTriggered = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const onAbort = () => controller?.abort();
+        const onTotalAbort = () => controller?.abort();
         if (externalSignal && controller) externalSignal.addEventListener('abort', onAbort, { once: true });
+        if (totalController && controller) totalController.signal.addEventListener('abort', onTotalAbort, { once: true });
         if (timeoutMs > 0 && controller) {
           timer = setTimeout(() => {
             timeoutTriggered = true;
@@ -258,7 +337,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
             : (adapterOutput as AdapterResult).response;
           const metadata = adapterOutput instanceof Response ? undefined : (adapterOutput as AdapterResult).metadata;
           const headersAt = Date.now();
-          if (!rawResponse.ok) {
+          if (statusShouldThrow(attemptConfig, rawResponse.status)) {
             const payload = await readResponsePayload(rawResponse);
             const response: HttpResponse<unknown> = {
               data: payload,
@@ -285,9 +364,10 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
               retryable: retryOn.has(rawResponse.status),
             });
           }
-          const data = await parseResponse(rawResponse, attemptResolved.responseType ?? 'json', attemptResolved.maxBodySize);
+          const data = await parseResponse(rawResponse, attemptResolved.responseType ?? 'json', attemptResolved.maxBodySize, attemptResolved.parseJson);
+          const transformedData = await applyResponseTransforms(data, attemptResolved.transformResponse ?? defaults.transformResponse, rawResponse);
           const response: HttpResponse<unknown> = {
-            data,
+            data: transformedData,
             status: rawResponse.status,
             statusText: rawResponse.statusText,
             headers: new AxiosHeaders(rawResponse.headers),
@@ -310,18 +390,51 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           const normalized = toError(
             error,
             attemptConfig,
-            timeoutTriggered,
+            timeoutTriggered || totalTimeoutTriggered,
             Boolean(attemptResolved.signal?.aborted),
           );
           lastError = normalized;
-          if (attempt >= maxRetries || !shouldRetry(normalized, attemptConfig, retryOn)) throw normalized;
-          const delay = typeof retryDelay === 'function'
+          if (totalTimeoutTriggered) {
+            throw new HttpError('Request timed out', {
+              code: 'ETIMEDOUT',
+              config: attemptConfig,
+              isTimeout: true,
+              retryable: false,
+              cause: normalized,
+            });
+          }
+          if (attempt >= maxRetries || !(await shouldRetry(normalized, attemptConfig, retry, retryOn, attempt + 1))) throw normalized;
+          let delay = typeof retryDelay === 'function'
             ? Math.max(0, Number(retryDelay(attempt + 1, normalized)) || 0)
             : Math.max(0, Number(retryDelay) || 0) * (attempt + 1);
-          await sleep(delay);
+          const retryAfter = retry.respectRetryAfter === false ? undefined : retryAfterMs(normalized.response);
+          if (retryAfter !== undefined) delay = retryAfter;
+          if (retry.maxDelay !== undefined) delay = Math.min(delay, Math.max(0, retry.maxDelay));
+          if (retry.jitter) {
+            delay = typeof retry.jitter === 'function'
+              ? Math.max(0, Number(retry.jitter(delay, attempt + 1, normalized)) || 0)
+              : Math.random() * delay;
+          }
+          const retryContext: RetryContext = { error: normalized, retryCount: attempt + 1, delay };
+          if (retry.beforeRetry) await retry.beforeRetry(retryContext);
+          try {
+          await sleep(delay, overallSignal.signal);
+          } catch (sleepError) {
+            if (totalTimeoutTriggered) {
+              throw new HttpError('Request timed out', {
+                code: 'ETIMEDOUT',
+                config: attemptConfig,
+                isTimeout: true,
+                retryable: false,
+                cause: sleepError,
+              });
+            }
+            throw sleepError;
+          }
         } finally {
           if (timer) clearTimeout(timer);
           if (externalSignal && controller) externalSignal.removeEventListener('abort', onAbort);
+          if (totalController && controller) totalController.signal.removeEventListener('abort', onTotalAbort);
         }
       }
       throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: initialResolved });
@@ -336,16 +449,32 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     const ttl = typeof cacheSetting === 'object' ? Math.max(0, Number(cacheSetting.ttl) || 0) : 0;
     const runScheduled = () => rateLimiter.run(perform, {
       ...(initialResolved.rateLimit ?? {}),
-      signal: initialResolved.signal,
+      signal: overallSignal.signal,
     });
-    const result = cacheEnabled
-      ? await cache.getOrLoad(cacheKey(initialResolved), ttl, async () => (await runScheduled()).data)
-      : await runScheduled();
-    if (initialResolved.method !== 'GET') cache.clear();
-    if (fullResponse) return result as HttpResponse<T>;
-    return cacheEnabled ? result as T : (result as HttpResponse<T>).data;
+    try {
+      const result = cacheEnabled
+        ? await cache.getOrLoad(cacheKey(initialResolved), ttl, async () => (await runScheduled()).data)
+        : await runScheduled();
+      if (initialResolved.method !== 'GET') cache.clear();
+      if (fullResponse) return result as HttpResponse<T>;
+      return cacheEnabled ? result as T : (result as HttpResponse<T>).data;
     } catch (error) {
-      const fallbackConfig = resolved || createResolvedConfig(defaults, input, requestIdEnabled);
+      if (totalTimeoutTriggered) {
+        throw new HttpError('Request timed out', {
+          code: 'ETIMEDOUT',
+          config: resolved,
+          isTimeout: true,
+          retryable: false,
+          cause: error,
+        });
+      }
+      throw error;
+    } finally {
+      if (totalTimer) clearTimeout(totalTimer);
+      overallSignal.cleanup();
+    }
+    } catch (error) {
+      const fallbackConfig = resolved || await createResolvedConfig(defaults, input, requestIdEnabled);
       const normalized = toError(error, fallbackConfig, false, Boolean(input.signal?.aborted));
       notifyError(normalized);
       throw normalized;

@@ -11,12 +11,12 @@
       "import": "./dist/index.js"
     },
     "./node-http2": {
-      "types": "./dist/node-http2.d.ts",
-      "import": "./dist/node-http2.js"
+      "types": "./dist/adapters/node-http2.d.ts",
+      "import": "./dist/adapters/node-http2.js"
     },
     "./node-http3": {
-      "types": "./dist/node-http3.d.ts",
-      "import": "./dist/node-http3.js"
+      "types": "./dist/adapters/node-http3.d.ts",
+      "import": "./dist/adapters/node-http3.js"
     }
   },
   "files": [
@@ -24,7 +24,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "test": "npm run build && node --test --experimental-strip-types \"tests/**/*.test.ts\""
   },
   "devDependencies": {

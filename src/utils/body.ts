@@ -10,9 +10,14 @@ export function isPlainBody(value: unknown): boolean {
   return true;
 }
 
-export function encodeBody(data: unknown, body: BodyInit | null | undefined, headers: Headers): BodyInit | null | undefined {
+export function encodeBody(
+  data: unknown,
+  body: BodyInit | null | undefined,
+  headers: Headers,
+  stringifyJson: (value: unknown) => string = JSON.stringify,
+): BodyInit | null | undefined {
   if (data === undefined) return body;
   if (!isPlainBody(data)) return data as BodyInit;
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  return JSON.stringify(data);
+  return stringifyJson(data);
 }

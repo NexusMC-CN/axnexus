@@ -8,10 +8,14 @@
 - 提供 `get`、`post`、`put`、`patch`、`delete` 和通用 `request` 方法。
 - 自动处理 JSON、文本、`Blob`、`ArrayBuffer`、`FormData` 和 `Response`。
 - 支持请求/响应拦截器、请求 ID、超时、`AbortSignal` 和可配置重试。
+- 支持结构化重试策略、`Retry-After`、退避抖动、总超时、状态校验和 JSON 转换钩子。
 - 支持 GET 响应 TTL 缓存和并发请求去重。
+- 提供可独立使用的 stale-while-revalidate 响应缓存和 SSR/middleware `fetchJson`。
 - `AxiosHeaders` 支持大小写不敏感读写、规范化、合并、迭代和 method shortcut。
 - Fetch 下载进度、XHR 上传进度、响应大小限制和完整 response metadata。
+- 提供有界并发分块上传编排器，不绑定 AVMCBBS 的上传端点协议。
 - 按客户端/资源组调度的并发、优先级、请求频率和队列超时限制。
+- 提供脱敏后的请求生命周期日志适配器，不输出 Cookie 和 Authorization 原文。
 - 可选 Node HTTP/2 adapter，以及只通过注入 transport 启用的 HTTP/3 adapter。
 - CSRF 通过显式拦截器接入，不修改全局 `fetch`，不读取页面 Cookie。
 
@@ -76,6 +80,20 @@ const result = await http.get('/items', {
 `params` 使用 `URLSearchParams` 编码，数组会生成重复的 query key，`null` 和 `undefined` 会被跳过。相对路径会与 `baseURL` 合并；如果不允许绝对 URL，可以设置 `allowAbsoluteURL: false`。
 
 普通对象、数组、数字、布尔值和 `null` 会自动 JSON 序列化。字符串、`FormData`、`Blob`、`ArrayBuffer`、`URLSearchParams` 和其他 `BodyInit` 会原样传递。
+
+### 状态、超时和转换
+
+```typescript
+const result = await http.get('/jobs/123', {
+  // 仅把 500 以上视为错误，404 会正常返回
+  validateStatus: (status) => status < 500,
+  totalTimeout: 30_000,
+  parseJson: (text) => JSON.parse(text, reviveDates),
+  transformResponse: (data) => ({ ...data as object, receivedAt: Date.now() }),
+});
+```
+
+`timeout` 限制单次 adapter 尝试，`totalTimeout` 覆盖限速排队、重试等待和所有尝试。`throwHttpErrors: false` 可以关闭默认的非 2xx 异常；`transformRequest` 和 `stringifyJson` 可用于接入自定义序列化协议。
 
 ## FormData
 
@@ -188,6 +206,25 @@ const created = await http.post('/jobs', payload, {
 
 网络错误和超时会遵循同一套重试次数配置。重试期间会复用同一个 `X-Request-Id`。
 
+需要更细粒度控制时可以传入对象：
+
+```typescript
+const response = await http.getResponse('/upstream', {
+  retry: {
+    limit: 3,
+    methods: ['GET'],
+    statusCodes: [429, 502, 503],
+    delay: (attempt) => 200 * 2 ** (attempt - 1),
+    maxDelay: 5_000,
+    jitter: true,
+    respectRetryAfter: true,
+    beforeRetry: ({ retryCount, error }) => logger.warn({ retryCount, error }),
+  },
+});
+```
+
+默认仍只对幂等方法按状态码重试；`methods` 可以显式放开方法范围，`shouldRetry` 可以完全接管判断。
+
 ## 拦截器
 
 ```typescript
@@ -223,6 +260,56 @@ cachedHttp.clearCache();
 ```
 
 缓存只作用于 GET，请求 key 包含最终 URL 和请求头（自动生成的请求 ID 除外）。相同 key 的进行中请求会共享一次 adapter 调用；成功的非 GET 请求会清空当前实例缓存。缓存保存在内存中，不跨实例或持久化。
+
+需要 stale-while-revalidate 或 stale-if-error 时直接使用 `ResponseCache`：
+
+```typescript
+import { ResponseCache } from 'axnexus';
+
+const cache = new ResponseCache<{ items: string[] }>();
+const data = await cache.getOrLoad('catalog', loadCatalog, {
+  ttl: 30_000,
+  staleWhileRevalidate: 120_000,
+  staleIfError: true,
+});
+```
+
+`fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求，会转发显式 `cookie`、处理空响应并允许注入 `fetch` 和 JSON parser；`timeout` 与 AVMCBBS 原实现的 `timeoutMs` 都可用：
+
+```typescript
+import { fetchJson } from 'axnexus';
+
+const data = await fetchJson<{ ok: boolean }>('https://api.example.test/health', {
+  cookie: request.headers.get('cookie') ?? undefined,
+  timeout: 5_000,
+});
+```
+
+## 分块上传
+
+`uploadChunks` 只负责编排分块、并发和聚合进度，实际上传由调用方提供，因此可以复用 AVMCBBS 现有的 multipart、对象存储或分片协议：
+
+```typescript
+import { uploadChunks } from 'axnexus';
+
+const parts = await uploadChunks(bytes, {
+  chunkSize: 5 * 1024 * 1024,
+  concurrency: 3,
+  onProgress: (loaded, total) => console.log(loaded / total),
+  upload: ({ index, body }) => putPart(index, body),
+});
+```
+
+## 请求观测
+
+`createRequestLogger` 将请求开始、完成和错误统一成可注入的记录格式，并默认脱敏 `authorization`、`cookie` 和 `set-cookie`：
+
+```typescript
+import { createRequestLogger } from 'axnexus';
+
+const logger = createRequestLogger((record) => telemetry.emit(record));
+logger.start({ method: 'GET', url, headers });
+```
 
 ## CSRF
 
@@ -267,13 +354,15 @@ const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) })
 
 ```text
 src/
-  core/       client、pipeline、错误、拦截器和类型
+  core/       client、错误、拦截器和类型
   headers/    AxiosHeaders、method defaults 和 presets
-  transfer/   upload/download、progress、限速和 multipart
+  transfer/   progress、限速、multipart 和 chunked 上传编排
   adapters/   fetch、xhr、node-http2、node-http3
-  cache/      GET TTL 与 inflight 去重
+  cache/      GET TTL、inflight 去重和 stale 响应缓存
+  server/     SSR/middleware JSON helper
+  observability/ 请求生命周期日志与脱敏
   security/   CSRF 与 header sanitizer
-  utils/      body、response、query 工具
+  utils/      body、response、query、AbortSignal 工具
 ```
 
 该包只负责通用 HTTP 传输，不包含 AVMCBBS 的业务 API、认证弹窗、站点配置或上传端点协议。

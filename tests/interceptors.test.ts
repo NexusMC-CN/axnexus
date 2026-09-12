@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   applyInterceptorChain,
   createInterceptorManager,
-} from '../dist/interceptors.js';
+} from '../dist/core/interceptors.js';
 
 test('runs request interceptors in registration order', async () => {
   const manager = createInterceptorManager<string>();

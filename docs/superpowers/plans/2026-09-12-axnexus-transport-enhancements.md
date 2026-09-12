@@ -15,12 +15,12 @@
 **创建：**
 
 - `src/core/client.ts`：实例 API、请求生命周期、重试和完整响应方法。
-- `src/core/pipeline.ts`：配置解析、拦截器、调度器和 adapter 编排。
+- `src/core/client.ts`：配置解析、拦截器、调度器和 adapter 编排。
 - `src/core/errors.ts`、`src/core/interceptors.ts`、`src/core/types.ts`：核心类型与错误。
 - `src/headers/headers.ts`、`src/headers/methods.ts`、`src/headers/presets.ts`：AxiosHeaders 和 method defaults。
-- `src/transfer/progress.ts`、`src/transfer/upload.ts`、`src/transfer/download.ts`、`src/transfer/rate-limiter.ts`、`src/transfer/multipart.ts`：进度、流、限速和 multipart 辅助。
+- `src/transfer/progress.ts`、`src/transfer/rate-limiter.ts`、`src/transfer/multipart.ts`、`src/transfer/chunked.ts`：进度、流、限速、multipart 和分块编排辅助。
 - `src/adapters/fetch.ts`、`src/adapters/xhr.ts`、`src/adapters/types.ts`、`src/adapters/node-http2.ts`、`src/adapters/node-http3.ts`：传输 adapter 和协议扩展。
-- `src/cache/get-cache.ts`、`src/security/csrf.ts`、`src/security/header-sanitizer.ts`、`src/utils/query.ts`、`src/utils/body.ts`、`src/utils/response.ts`：现有能力按职责迁移。
+- `src/cache/get-cache.ts`、`src/cache/response-cache.ts`、`src/server/json.ts`、`src/observability/request-logger.ts`、`src/security/csrf.ts`、`src/security/header-sanitizer.ts`、`src/utils/query.ts`、`src/utils/body.ts`、`src/utils/response.ts`、`src/utils/signal.ts`：现有能力按职责迁移。
 - `tests/core/*.test.ts`、`tests/headers/*.test.ts`、`tests/transfer/*.test.ts`、`tests/adapters/*.test.ts`：新增模块测试。
 
 **修改：**
@@ -29,12 +29,12 @@
 - `package.json`：增加 `./node-http2`、`./node-http3` 条件导出和测试脚本匹配新目录。
 - `README.md`：补充 headers、进度、限速、完整响应和 adapter 示例及运行环境限制。
 
-**兼容保留：** 根目录旧模块保留 re-export 文件，确保现有内部导入和 AVMCBBS 后续接入的迁移成本可控；实现代码只放在新目录。
+**路径边界：** 当前包尚未发布，根目录旧模块的 re-export 兼容层已删除；公共入口统一从 `src/index.ts` 导出，内部代码只引用职责目录。
 
 ### 任务 1：迁移核心类型与目录边界
 
 **文件：**
-- 创建：`src/core/types.ts`、`src/core/errors.ts`、`src/core/interceptors.ts`、`src/core/client.ts`、`src/core/pipeline.ts`
+- 创建：`src/core/types.ts`、`src/core/errors.ts`、`src/core/interceptors.ts`、`src/core/client.ts`
 - 修改：`src/types.ts`、`src/errors.ts`、`src/interceptors.ts`、`src/client.ts`
 - 测试：`tests/core/compatibility.test.ts`
 
@@ -57,9 +57,9 @@ test('legacy root entry keeps data-returning request API', async () => {
 
 预期：现有入口通过；新目录文件尚不存在时，新增测试保持可运行并记录迁移前基线。
 
-- [ ] **步骤 3：迁移实现并保留 re-export**
+- [ ] **步骤 3：迁移实现并删除未发布包的根路径兼容层**
 
-把现有类型、错误、拦截器和 client 实现拆到 `src/core`，将 `src/types.ts`、`src/errors.ts`、`src/interceptors.ts`、`src/client.ts` 改为只 re-export 新路径。`HttpAdapter` 扩展为可返回 adapter metadata 的结构，`HttpResponse.headers` 改为 `AxiosHeaders`，同时保留对 `HeadersInit` 的输入兼容。
+把现有类型、错误、拦截器和 client 实现拆到 `src/core`，删除 `src/types.ts`、`src/errors.ts`、`src/interceptors.ts`、`src/client.ts` 等未发布包的根路径兼容文件。`HttpAdapter` 扩展为可返回 adapter metadata 的结构，`HttpResponse.headers` 改为 `AxiosHeaders`，同时保留对 `HeadersInit` 的输入兼容。
 
 - [ ] **步骤 4：运行构建与全量旧测试**
 
@@ -78,7 +78,7 @@ git commit -m "refactor: organize axnexus core modules"
 
 **文件：**
 - 创建：`src/headers/headers.ts`、`src/headers/methods.ts`、`src/headers/presets.ts`
-- 修改：`src/core/types.ts`、`src/core/pipeline.ts`、`src/index.ts`
+- 修改：`src/core/types.ts`、`src/core/client.ts`、`src/index.ts`
 - 测试：`tests/headers/headers.test.ts`、`tests/headers/methods.test.ts`
 
 - [ ] **步骤 1：编写失败测试**
@@ -108,15 +108,15 @@ git commit -m "refactor: organize axnexus core modules"
 - [ ] **步骤 6：Commit**
 
 ```bash
-git add src/headers src/core/types.ts src/core/pipeline.ts src/index.ts tests/headers
+git add src/headers src/core/types.ts src/core/client.ts src/index.ts tests/headers
 git commit -m "feat: add axios-style headers"
 ```
 
 ### 任务 3：实现进度事件、multipart 和限速调度
 
 **文件：**
-- 创建：`src/transfer/progress.ts`、`src/transfer/upload.ts`、`src/transfer/download.ts`、`src/transfer/rate-limiter.ts`、`src/transfer/multipart.ts`
-- 修改：`src/core/types.ts`、`src/core/pipeline.ts`
+- 创建：`src/transfer/progress.ts`、`src/transfer/rate-limiter.ts`、`src/transfer/multipart.ts`、`src/transfer/chunked.ts`
+- 修改：`src/core/types.ts`、`src/core/client.ts`
 - 测试：`tests/transfer/progress.test.ts`、`tests/transfer/rate-limiter.test.ts`、`tests/transfer/multipart.test.ts`
 
 - [ ] **步骤 1：编写失败测试**
@@ -150,7 +150,7 @@ git commit -m "feat: add axios-style headers"
 - [ ] **步骤 7：Commit**
 
 ```bash
-git add src/transfer src/core/types.ts src/core/pipeline.ts tests/transfer
+git add src/transfer src/core/types.ts src/core/client.ts tests/transfer
 git commit -m "feat: add transfer progress and rate limiting"
 ```
 
@@ -158,7 +158,7 @@ git commit -m "feat: add transfer progress and rate limiting"
 
 **文件：**
 - 创建：`src/adapters/types.ts`、`src/adapters/fetch.ts`、`src/adapters/xhr.ts`、`src/utils/body.ts`、`src/utils/response.ts`、`src/security/header-sanitizer.ts`
-- 修改：`src/core/pipeline.ts`、`src/core/errors.ts`
+- 修改：`src/core/client.ts`、`src/core/errors.ts`
 - 测试：`tests/adapters/fetch.test.ts`、`tests/adapters/xhr.test.ts`、`tests/adapters/response.test.ts`
 
 - [ ] **步骤 1：编写失败测试**
@@ -195,7 +195,7 @@ git commit -m "feat: add fetch xhr adapters and transfer metadata"
 ### 任务 5：接入完整响应 API、协议与计时 metadata
 
 **文件：**
-- 修改：`src/core/client.ts`、`src/core/pipeline.ts`、`src/core/types.ts`、`src/cache/get-cache.ts`
+- 修改：`src/core/client.ts`、`src/core/types.ts`、`src/cache/get-cache.ts`
 - 测试：`tests/core/response-api.test.ts`、`tests/core/timings.test.ts`
 
 - [ ] **步骤 1：编写失败测试**
@@ -259,13 +259,13 @@ git commit -m "feat: add optional http2 and http3 adapters"
 ### 任务 7：迁移缓存与安全模块并更新 README
 
 **文件：**
-- 创建：`src/cache/get-cache.ts`、`src/security/csrf.ts`、`src/utils/query.ts`
-- 修改：`src/cache.ts`、`src/csrf.ts`、`src/query.ts`、`src/index.ts`、`README.md`
+- 创建：`src/cache/get-cache.ts`、`src/cache/response-cache.ts`、`src/server/json.ts`、`src/observability/request-logger.ts`、`src/security/csrf.ts`、`src/utils/query.ts`
+- 修改/删除：`src/index.ts`、`README.md` 以及未发布包中的旧根路径兼容文件
 - 测试：`tests/cache/*.test.ts`、`tests/security/csrf.test.ts`、`tests/query/query.test.ts`
 
-- [ ] **步骤 1：迁移并保留根路径 re-export**
+- [ ] **步骤 1：迁移并删除未发布包的根路径兼容层**
 
-把现有缓存、CSRF、query 实现移动到职责目录，根文件只 re-export；缓存 key 使用最终 `AxiosHeaders`，保留 generation/inflight race 修复。
+把现有缓存、CSRF、query 实现移动到职责目录，删除旧根文件；缓存 key 使用最终 `AxiosHeaders`，保留 generation/inflight race 修复。
 
 - [ ] **步骤 2：补充 README 示例**
 

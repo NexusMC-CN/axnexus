@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createCsrfInterceptor } from '../dist/csrf.js';
+import { createCsrfInterceptor } from '../dist/security/csrf.js';
 
 test('adds a token only to configured unsafe methods', () => {
   const interceptor = createCsrfInterceptor({

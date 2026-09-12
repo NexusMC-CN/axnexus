@@ -1,5 +1,5 @@
 import { HttpError } from '../core/errors.js';
-import type { ResponseType } from '../core/types.js';
+import type { JsonParser, ResponseType } from '../core/types.js';
 
 function assertSize(size: number, maxBodySize: number | undefined): void {
   if (maxBodySize !== undefined && maxBodySize >= 0 && size > maxBodySize) {
@@ -39,7 +39,12 @@ async function readBytes(response: Response, maxBodySize?: number): Promise<Uint
   return bytes;
 }
 
-export async function readResponse(response: Response, type: ResponseType = 'json', maxBodySize?: number): Promise<unknown> {
+export async function readResponse(
+  response: Response,
+  type: ResponseType = 'json',
+  maxBodySize?: number,
+  parseJson: JsonParser = (text) => JSON.parse(text),
+): Promise<unknown> {
   if (type === 'response') return response;
   if (response.status === 204 || response.headers.get('content-length') === '0') return null;
   const bytes = await readBytes(response, maxBodySize);
@@ -49,7 +54,7 @@ export async function readResponse(response: Response, type: ResponseType = 'jso
   const raw = new TextDecoder().decode(bytes);
   if (type === 'text') return raw.trim() ? raw : null;
   try {
-    return JSON.parse(raw);
+    return await parseJson(raw);
   } catch (cause) {
     throw new HttpError('Response payload is not valid JSON', { code: 'ERR_BAD_PAYLOAD', cause });
   }

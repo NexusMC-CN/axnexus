@@ -27,6 +27,30 @@ export type QueryParams = Record<string, QueryValue | QueryValue[] | null | unde
 
 export type RetryDelay = number | ((attempt: number, error: Error) => number);
 
+export interface RetryContext {
+  error: import('./errors.js').HttpError;
+  retryCount: number;
+  delay: number;
+}
+
+export interface RetryOptions {
+  limit?: number;
+  methods?: string[];
+  statusCodes?: number[];
+  errorCodes?: string[];
+  delay?: number | ((attempt: number, error: import('./errors.js').HttpError) => number);
+  jitter?: boolean | ((delay: number, attempt: number, error: import('./errors.js').HttpError) => number);
+  maxDelay?: number;
+  respectRetryAfter?: boolean;
+  shouldRetry?: (context: RetryContext) => boolean | Promise<boolean>;
+  beforeRetry?: (context: RetryContext) => void | Promise<void>;
+}
+
+export type JsonParser = (text: string) => unknown | Promise<unknown>;
+export type JsonStringifier = (value: unknown) => string;
+export type RequestTransform = (data: unknown, headers: Headers) => unknown | Promise<unknown>;
+export type ResponseTransform = (data: unknown, response: Response) => unknown | Promise<unknown>;
+
 export interface CacheOptions {
   ttl?: number;
 }
@@ -41,10 +65,17 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
   params?: QueryParams;
   timeout?: number;
   signal?: AbortSignal;
-  retry?: number;
+  retry?: number | RetryOptions;
   retryDelay?: RetryDelay;
   retryOn?: number[];
   retryUnsafeMethods?: boolean;
+  validateStatus?: (status: number) => boolean;
+  throwHttpErrors?: boolean | ((status: number) => boolean);
+  totalTimeout?: number;
+  parseJson?: JsonParser;
+  stringifyJson?: JsonStringifier;
+  transformRequest?: RequestTransform | RequestTransform[];
+  transformResponse?: ResponseTransform | ResponseTransform[];
   cache?: boolean | CacheOptions;
   bypassCache?: boolean;
   responseType?: ResponseType;
@@ -104,10 +135,17 @@ export interface HttpClientConfig extends Omit<RequestConfig, 'method' | 'body' 
   headers?: HeadersInit | import('../headers/methods.js').HeaderDefaults | import('../headers/headers.js').AxiosHeaders;
   credentials?: RequestCredentials;
   timeout?: number;
-  retry?: number;
+  retry?: number | RetryOptions;
   retryDelay?: RetryDelay;
   retryOn?: number[];
   retryUnsafeMethods?: boolean;
+  validateStatus?: (status: number) => boolean;
+  throwHttpErrors?: boolean | ((status: number) => boolean);
+  totalTimeout?: number;
+  parseJson?: JsonParser;
+  stringifyJson?: JsonStringifier;
+  transformRequest?: RequestTransform | RequestTransform[];
+  transformResponse?: ResponseTransform | ResponseTransform[];
   adapter?: HttpAdapter;
   cache?: CacheOptions;
   requestId?: boolean | (() => string);
