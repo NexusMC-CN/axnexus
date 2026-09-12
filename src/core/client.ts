@@ -2,6 +2,8 @@ import { GetRequestCache } from '../cache.js';
 import { HttpError } from './errors.js';
 import { applyInterceptorChain, createInterceptorManager } from './interceptors.js';
 import { appendQuery, resolveURL } from '../query.js';
+import { fetchAdapter } from '../adapters/fetch.js';
+import { readErrorPayload, readResponse } from '../utils/response.js';
 import type {
   HttpAdapter,
   HttpClient,
@@ -81,50 +83,15 @@ function responseMessage(payload: unknown, status: number): string {
 }
 
 async function readResponsePayload(response: Response): Promise<unknown> {
-  const raw = await response.clone().text().catch(() => '');
-  if (!raw.trim()) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return raw;
-  }
+  return readErrorPayload(response);
 }
 
-async function parseResponse(response: Response, type: ResponseType): Promise<unknown> {
-  if (type === 'response') return response;
-  if (response.status === 204 || response.headers.get('content-length') === '0') return null;
-  if (type === 'text') {
-    const value = await response.text();
-    return value.trim() ? value : null;
-  }
-  if (type === 'blob') return response.blob();
-  if (type === 'arrayBuffer') return response.arrayBuffer();
-  const raw = await response.text();
-  if (!raw.trim()) return null;
-  try {
-    return JSON.parse(raw);
-  } catch (cause) {
-    throw new HttpError('Response payload is not valid JSON', {
-      code: 'ERR_BAD_PAYLOAD',
-      cause,
-    });
-  }
+async function parseResponse(response: Response, type: ResponseType, maxBodySize?: number): Promise<unknown> {
+  return readResponse(response, type, maxBodySize);
 }
 
 function buildFetchAdapter(): HttpAdapter {
-  return async (config) => fetch(config.url, {
-    method: config.method,
-    headers: config.headers,
-    body: config.body,
-    signal: config.signal,
-    credentials: config.credentials,
-    mode: config.mode,
-    redirect: config.redirect,
-    referrer: config.referrer,
-    referrerPolicy: config.referrerPolicy,
-    integrity: config.integrity,
-    keepalive: config.keepalive,
-  });
+  return fetchAdapter;
 }
 
 function createResolvedConfig(
@@ -301,7 +268,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
               retryable: retryOn.has(rawResponse.status),
             });
           }
-          const data = await parseResponse(rawResponse, attemptResolved.responseType ?? 'json');
+          const data = await parseResponse(rawResponse, attemptResolved.responseType ?? 'json', attemptResolved.maxBodySize);
           const response: HttpResponse<unknown> = {
             data,
             status: rawResponse.status,

@@ -19,3 +19,10 @@ export type { TransferPhase, TransferProgress, ProgressTrackerOptions } from './
 export { RateLimiter } from './transfer/rate-limiter.js';
 export type { RateLimitOptions } from './transfer/rate-limiter.js';
 export { createFormData } from './transfer/multipart.js';
+export { createFetchAdapter, fetchAdapter } from './adapters/fetch.js';
+export { createXhrAdapter, xhrAdapter } from './adapters/xhr.js';
+export { hasAdapterCapability } from './adapters/types.js';
+export type { AdapterCapability, AdapterConfig, AdapterMetadata, AdapterResult, HttpAdapterFactory } from './adapters/types.js';
+export { readResponse, readErrorPayload } from './utils/response.js';
+export { encodeBody, isPlainBody } from './utils/body.js';
+export { sanitizeHeaderName, sanitizeHeaderValue } from './security/header-sanitizer.js';

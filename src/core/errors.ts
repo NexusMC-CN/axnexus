@@ -7,7 +7,10 @@ export type HttpErrorCode =
   | 'ERR_CANCELED'
   | 'ERR_BAD_PAYLOAD'
   | 'ERR_INVALID_HEADER'
-  | 'ERR_RATE_LIMIT_QUEUE_TIMEOUT';
+  | 'ERR_RATE_LIMIT_QUEUE_TIMEOUT'
+  | 'ERR_UNSUPPORTED_ADAPTER'
+  | 'ERR_MAX_BODY_SIZE'
+  | 'ERR_PROTOCOL_NEGOTIATION';
 
 export class HttpError<T = unknown> extends Error {
   readonly code: HttpErrorCode;

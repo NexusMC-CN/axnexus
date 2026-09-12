@@ -27,6 +27,10 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
   bypassCache?: boolean;
   responseType?: ResponseType;
   allowAbsoluteURL?: boolean;
+  onUploadProgress?: import('../transfer/progress.js').ProgressListener;
+  onDownloadProgress?: import('../transfer/progress.js').ProgressListener;
+  progressInterval?: number;
+  maxBodySize?: number;
 }
 
 export interface ResolvedRequestConfig extends RequestConfig {
