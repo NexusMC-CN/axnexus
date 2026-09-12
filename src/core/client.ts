@@ -1,11 +1,12 @@
 import { GetRequestCache } from '../cache.js';
 import { HttpError } from './errors.js';
 import { applyInterceptorChain, createInterceptorManager } from './interceptors.js';
-import { appendQuery, resolveURL } from '../query.js';
+import { appendQuery, resolveURL } from '../utils/query.js';
 import { fetchAdapter } from '../adapters/fetch.js';
 import { readErrorPayload, readResponse } from '../utils/response.js';
 import { AxiosHeaders } from '../headers/headers.js';
 import { mergeMethodHeaders, type HeaderDefaults } from '../headers/methods.js';
+import { RateLimiter } from '../transfer/rate-limiter.js';
 import type {
   AdapterResult,
   HttpAdapter,
@@ -183,6 +184,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const requestInterceptors = createInterceptorManager<RequestConfig>();
   const responseInterceptors = createInterceptorManager<HttpResponse<unknown>>();
   const cache = new GetRequestCache(createRequestId());
+  const rateLimiter = new RateLimiter(defaults.rateLimit ?? {});
 
   const requestInternal = async <T>(input: RequestConfig, fullResponse: boolean): Promise<T | HttpResponse<T>> => {
     let resolved: ResolvedRequestConfig | undefined;
@@ -247,6 +249,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           ...attemptResolved,
           signal: controller?.signal,
         };
+        (attemptConfig as ResolvedRequestConfig & { rateLimiter?: RateLimiter }).rateLimiter = rateLimiter;
         const startedAt = Date.now();
         try {
           const adapterOutput = await adapter(attemptConfig);
@@ -331,9 +334,13 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
       && cacheSetting !== undefined
       && initialResolved.responseType !== 'response';
     const ttl = typeof cacheSetting === 'object' ? Math.max(0, Number(cacheSetting.ttl) || 0) : 0;
+    const runScheduled = () => rateLimiter.run(perform, {
+      ...(initialResolved.rateLimit ?? {}),
+      signal: initialResolved.signal,
+    });
     const result = cacheEnabled
-      ? await cache.getOrLoad(cacheKey(initialResolved), ttl, async () => (await perform()).data)
-      : await perform();
+      ? await cache.getOrLoad(cacheKey(initialResolved), ttl, async () => (await runScheduled()).data)
+      : await runScheduled();
     if (initialResolved.method !== 'GET') cache.clear();
     if (fullResponse) return result as HttpResponse<T>;
     return cacheEnabled ? result as T : (result as HttpResponse<T>).data;

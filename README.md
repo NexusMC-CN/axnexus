@@ -1,6 +1,6 @@
 # axnexus
 
-一个基于原生 `fetch` 的轻量 TypeScript HTTP 客户端，提供 Axios 风格的实例 API、拦截器、超时取消、重试和 GET 缓存。
+一个基于原生 Fetch/XHR 的 TypeScript HTTP 客户端，提供 Axios 风格的实例 API、大小写不敏感 headers、进度捕捉、限速调度、超时取消、重试和 GET 缓存。
 
 ## 特性
 
@@ -9,6 +9,10 @@
 - 自动处理 JSON、文本、`Blob`、`ArrayBuffer`、`FormData` 和 `Response`。
 - 支持请求/响应拦截器、请求 ID、超时、`AbortSignal` 和可配置重试。
 - 支持 GET 响应 TTL 缓存和并发请求去重。
+- `AxiosHeaders` 支持大小写不敏感读写、规范化、合并、迭代和 method shortcut。
+- Fetch 下载进度、XHR 上传进度、响应大小限制和完整 response metadata。
+- 按客户端/资源组调度的并发、优先级、请求频率和队列超时限制。
+- 可选 Node HTTP/2 adapter，以及只通过注入 transport 启用的 HTTP/3 adapter。
 - CSRF 通过显式拦截器接入，不修改全局 `fetch`，不读取页面 Cookie。
 
 这个包只负责通用 HTTP 传输，不包含 AVMCBBS 的业务 API、认证弹窗、站点配置或上传端点协议。
@@ -39,6 +43,19 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 ```
 
 默认凭据策略是 `include`，默认自动添加 `Accept: application/json` 和 `X-Request-Id`。调用方显式传入同名请求头时会保留调用方的值。
+
+## Headers
+
+```typescript
+import { AxiosHeaders } from 'axnexus';
+
+const headers = new AxiosHeaders({ Authorization: 'Bearer token' });
+headers.setAccept('application/json');
+headers.set('X-Trace-Id', 'trace-1');
+console.log(headers.get('authorization'));
+```
+
+请求配置的 `headers` 可以包含 `common` 和按 method 分组的默认值；合并顺序是客户端默认值、`common`、当前 method、请求级值，后者优先且不会产生大小写重复键。
 
 ## 请求配置
 
@@ -72,6 +89,47 @@ const uploaded = await http.post<{ url: string }>('/upload', form);
 
 客户端不会为 `FormData` 手动设置 `Content-Type`，浏览器会自动补充 multipart boundary。
 
+## 进度和限速
+
+下载进度在 Fetch response body 可读时逐块报告；上传进度需要显式选择 XHR adapter：
+
+```typescript
+import { createHttpClient, xhrAdapter } from 'axnexus';
+
+const browserHttp = createHttpClient({ adapter: xhrAdapter });
+await browserHttp.post('/upload', form, {
+  onUploadProgress: ({ loaded, total, percent }) => {
+    console.log('upload', loaded, total, percent);
+  },
+});
+
+await http.get('/large-file', {
+  onDownloadProgress: ({ loaded, total, rate }) => {
+    console.log('download', loaded, total, rate);
+  },
+  rateLimit: {
+    maxConcurrent: 2,
+    bytesPerSecond: 2_000_000,
+    priority: 10,
+    queueTimeout: 5_000,
+    resourceGroup: 'downloads',
+  },
+});
+```
+
+`RateLimiter` 也可以单独使用。限速等待可被 `AbortSignal` 取消；队列超时会抛出 `ERR_RATE_LIMIT_QUEUE_TIMEOUT`。默认 Fetch adapter 不伪造上传进度，因为标准 Fetch 没有跨环境一致的请求体进度事件。
+
+## 完整响应
+
+便捷方法默认只返回 `data`，需要状态码、headers、协议和 timings 时使用 response 方法：
+
+```typescript
+const response = await http.getResponse<{ id: string }>('/users/me');
+console.log(response.data, response.status, response.protocol, response.timings.duration);
+```
+
+可用方法为 `requestResponse`、`getResponse`、`postResponse`、`putResponse`、`patchResponse` 和 `deleteResponse`。完整响应不会进入 GET data cache；`responseType: 'response'` 在普通方法中仍返回原始 `Response`。
+
 ## 错误处理
 
 ```typescript
@@ -96,6 +154,10 @@ try {
 | `ETIMEDOUT` | 请求超过超时时间 |
 | `ERR_CANCELED` | 外部 `AbortSignal` 取消 |
 | `ERR_BAD_PAYLOAD` | 成功响应无法解析为 JSON |
+| `ERR_INVALID_HEADER` | header 名称或值包含非法字符 |
+| `ERR_MAX_BODY_SIZE` | 响应体超过 `maxBodySize` |
+| `ERR_RATE_LIMIT_QUEUE_TIMEOUT` | 请求在限速队列中超时 |
+| `ERR_UNSUPPORTED_ADAPTER` | 当前环境不支持所选 adapter |
 
 ## 取消和超时
 
@@ -177,6 +239,44 @@ http.interceptors.request.use(csrf);
 ```
 
 默认只处理 `POST`、`PUT`、`PATCH` 和 `DELETE`，显式设置的 header 优先于 reader 返回的 token。
+
+## HTTP/2 和 HTTP/3
+
+HTTP/2 只在 Node 环境通过独立入口启用，adapter 会按 origin 复用 session，并在完整响应中标记 `protocol: 'h2'`：
+
+```typescript
+import { createHttpClient } from 'axnexus';
+import { nodeHttp2Adapter } from 'axnexus/node-http2';
+
+const nodeHttp = createHttpClient({ adapter: nodeHttp2Adapter });
+const response = await nodeHttp.getResponse('/health');
+console.log(response.protocol); // h2
+```
+
+HTTP/3 不绑定具体 QUIC 实现，调用方提供 `QuicTransport` 后从 `axnexus/node-http3` 创建 adapter：
+
+```typescript
+import { createHttp3Adapter } from 'axnexus/node-http3';
+
+const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) });
+```
+
+没有注入 transport 时会抛出 `ERR_UNSUPPORTED_ADAPTER`。默认入口不会加载 Node 内置模块，也不会把 HTTP/1.1 Fetch 请求误标为 HTTP/2 或 HTTP/3。
+
+## 模块结构
+
+```text
+src/
+  core/       client、pipeline、错误、拦截器和类型
+  headers/    AxiosHeaders、method defaults 和 presets
+  transfer/   upload/download、progress、限速和 multipart
+  adapters/   fetch、xhr、node-http2、node-http3
+  cache/      GET TTL 与 inflight 去重
+  security/   CSRF 与 header sanitizer
+  utils/      body、response、query 工具
+```
+
+该包只负责通用 HTTP 传输，不包含 AVMCBBS 的业务 API、认证弹窗、站点配置或上传端点协议。
 
 ## 开发
 

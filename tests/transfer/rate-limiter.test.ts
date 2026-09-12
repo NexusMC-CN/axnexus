@@ -35,3 +35,10 @@ test('cancels queued tasks without starting them', async () => {
   await assert.rejects(queued, (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED');
   await first;
 });
+
+test('consumes bytes through a token bucket', async () => {
+  const limiter = new RateLimiter({ bytesPerSecond: 1000 });
+  const started = Date.now();
+  await limiter.consume(1001);
+  assert.equal(Date.now() - started >= 1, true);
+});

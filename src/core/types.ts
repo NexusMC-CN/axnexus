@@ -53,6 +53,7 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
   onDownloadProgress?: import('../transfer/progress.js').ProgressListener;
   progressInterval?: number;
   maxBodySize?: number;
+  rateLimit?: import('../transfer/rate-limiter.js').RateLimitOptions;
 }
 
 export interface ResolvedRequestConfig extends RequestConfig {
@@ -110,5 +111,6 @@ export interface HttpClientConfig extends Omit<RequestConfig, 'method' | 'body' 
   adapter?: HttpAdapter;
   cache?: CacheOptions;
   requestId?: boolean | (() => string);
+  rateLimit?: import('../transfer/rate-limiter.js').RateLimitOptions;
   onRequestError?: (error: import('./errors.js').HttpError) => void;
 }

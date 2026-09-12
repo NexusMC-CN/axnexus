@@ -21,6 +21,7 @@ export type AdapterConfig = ResolvedRequestConfig & {
   onDownloadProgress?: import('../transfer/progress.js').ProgressListener;
   progressInterval?: number;
   maxBodySize?: number;
+  rateLimiter?: import('../transfer/rate-limiter.js').RateLimiter;
 };
 
 export type HttpAdapterFactory = (config: AdapterConfig) => Promise<Response | AdapterResult>;

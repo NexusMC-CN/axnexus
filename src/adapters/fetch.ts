@@ -29,6 +29,8 @@ export function createFetchAdapter(): HttpAdapterFactory {
       total: contentLength(response),
       onProgress: config.onDownloadProgress,
       progressInterval: config.progressInterval,
+      rateLimiter: config.rateLimiter,
+      rateLimit: config.rateLimit,
     });
     const wrapped = new Response(body, {
       status: response.status,

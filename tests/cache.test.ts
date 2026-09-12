@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GetRequestCache } from '../src/cache.ts';
+import { GetRequestCache } from '../dist/cache.js';
 
 test('deduplicates concurrent loads and clones cached values', async () => {
   const cache = new GetRequestCache('test-instance');

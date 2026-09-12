@@ -11,12 +11,16 @@ export interface TransferProgress {
   elapsed: number;
 }
 
+export type ProgressListener = (progress: TransferProgress) => void;
+
 export interface ProgressTrackerOptions {
   phase: TransferPhase;
   total?: number;
-  onProgress?: (progress: TransferProgress) => void;
+  onProgress?: ProgressListener;
   progressInterval?: number;
   now?: () => number;
+  rateLimiter?: import('./rate-limiter.js').RateLimiter;
+  rateLimit?: import('./rate-limiter.js').RateLimitOptions;
 }
 
 export class ProgressTracker {
@@ -28,6 +32,10 @@ export class ProgressTracker {
 
   get loaded(): number {
     return this.lastLoaded;
+  }
+
+  setTotal(total: number | undefined): void {
+    this.options.total = Number.isFinite(total) && (total as number) >= 0 ? total : undefined;
   }
 
   constructor(options: ProgressTrackerOptions) {
@@ -90,6 +98,7 @@ export function trackReadableStream(
           tracker.complete();
           controller.close();
         } else {
+          if (options.rateLimiter) await options.rateLimiter.consume(result.value.byteLength, options.rateLimit);
           tracker.update(tracker.loaded + result.value.byteLength);
           controller.enqueue(result.value);
         }
