@@ -14,3 +14,8 @@ export { AxiosHeaders } from './headers/headers.js';
 export type { HeaderValue, RawHeaders, HeaderMatcher, HeaderRewrite } from './headers/headers.js';
 export { mergeMethodHeaders } from './headers/methods.js';
 export type { HeaderDefaults } from './headers/methods.js';
+export { ProgressTracker, trackReadableStream } from './transfer/progress.js';
+export type { TransferPhase, TransferProgress, ProgressTrackerOptions } from './transfer/progress.js';
+export { RateLimiter } from './transfer/rate-limiter.js';
+export type { RateLimitOptions } from './transfer/rate-limiter.js';
+export { createFormData } from './transfer/multipart.js';

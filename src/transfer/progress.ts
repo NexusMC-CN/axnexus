@@ -1,0 +1,104 @@
+export type TransferPhase = 'upload' | 'download';
+
+export interface TransferProgress {
+  phase: TransferPhase;
+  loaded: number;
+  total?: number;
+  percent?: number;
+  rate?: number;
+  estimated?: number;
+  startedAt: number;
+  elapsed: number;
+}
+
+export interface ProgressTrackerOptions {
+  phase: TransferPhase;
+  total?: number;
+  onProgress?: (progress: TransferProgress) => void;
+  progressInterval?: number;
+  now?: () => number;
+}
+
+export class ProgressTracker {
+  private readonly options: ProgressTrackerOptions;
+  private readonly startedAt: number;
+  private lastLoaded = 0;
+  private lastReportedAt = -Infinity;
+  private lastRate: number | undefined;
+
+  get loaded(): number {
+    return this.lastLoaded;
+  }
+
+  constructor(options: ProgressTrackerOptions) {
+    this.options = options;
+    this.startedAt = (options.now ?? Date.now)();
+  }
+
+  update(loaded: number, timestamp = (this.options.now ?? Date.now)()): TransferProgress | undefined {
+    const safeLoaded = Math.max(this.lastLoaded, Number(loaded) || 0);
+    if (safeLoaded === this.lastLoaded && this.lastReportedAt !== -Infinity) return undefined;
+    this.lastLoaded = safeLoaded;
+    const elapsed = Math.max(0, timestamp - this.startedAt) / 1000;
+    const interval = Math.max(0, Number(this.options.progressInterval) || 0);
+    if (timestamp - this.lastReportedAt < interval && safeLoaded !== this.options.total) return undefined;
+    const deltaTime = Math.max(0, timestamp - this.lastReportedAt) / 1000;
+    if (this.lastReportedAt !== -Infinity && deltaTime > 0) this.lastRate = (safeLoaded - this.lastLoadedBeforeReport) / deltaTime;
+    this.lastReportedAt = timestamp;
+    this.lastLoadedBeforeReport = safeLoaded;
+    return this.emit(safeLoaded, elapsed);
+  }
+
+  private lastLoadedBeforeReport = 0;
+
+  complete(timestamp = (this.options.now ?? Date.now)()): TransferProgress | undefined {
+    const total = Number.isFinite(this.options.total) ? Math.max(0, this.options.total as number) : undefined;
+    return this.update(total === undefined ? this.lastLoaded : total, timestamp);
+  }
+
+  private emit(loaded: number, elapsed: number): TransferProgress {
+    const total = Number.isFinite(this.options.total) ? Math.max(0, this.options.total as number) : undefined;
+    const progress: TransferProgress = {
+      phase: this.options.phase,
+      loaded,
+      ...(total === undefined ? {} : { total, percent: total === 0 ? 100 : Math.min(100, (loaded / total) * 100) }),
+      ...(this.lastRate === undefined ? {} : { rate: this.lastRate }),
+      ...(total !== undefined && this.lastRate && this.lastRate > 0 ? { estimated: Math.max(0, (total - loaded) / this.lastRate) } : {}),
+      startedAt: this.startedAt,
+      elapsed,
+    };
+    try {
+      this.options.onProgress?.(progress);
+    } catch {
+      // Progress observers are non-critical and cannot fail the transfer.
+    }
+    return progress;
+  }
+}
+
+export function trackReadableStream(
+  stream: ReadableStream<Uint8Array>,
+  options: ProgressTrackerOptions,
+): ReadableStream<Uint8Array> {
+  const tracker = new ProgressTracker(options);
+  const reader = stream.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await reader.read();
+        if (result.done) {
+          tracker.complete();
+          controller.close();
+        } else {
+          tracker.update(tracker.loaded + result.value.byteLength);
+          controller.enqueue(result.value);
+        }
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
