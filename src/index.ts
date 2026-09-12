@@ -9,3 +9,4 @@ export {
   applyInterceptorChain,
   createInterceptorManager,
 } from './interceptors.js';
+export { appendQuery, resolveURL, serializeParams } from './query.js';
