@@ -1,6 +1,4 @@
-export function createHttpClient() {
-  return {};
-}
+export { createHttpClient } from './client.js';
 
 export type * from './types.js';
 export { HttpError, isHttpError } from './errors.js';

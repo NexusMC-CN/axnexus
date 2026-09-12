@@ -10,6 +10,7 @@ export interface CacheOptions {
 }
 
 export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'headers' | 'method' | 'signal'> {
+  url?: string;
   method?: string;
   headers?: HeadersInit;
   body?: BodyInit | null;
