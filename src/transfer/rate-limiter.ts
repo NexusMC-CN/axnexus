@@ -73,8 +73,8 @@ export class RateLimiter {
   async consume(bytes: number, options: RateLimitOptions = {}): Promise<void> {
     const merged = { ...this.defaults, ...options };
     const bytesPerSecond = Number(merged.bytesPerSecond);
-    const amount = Math.max(0, Number(bytes) || 0);
-    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0 || amount === 0) return;
+    let remaining = Math.max(0, Number(bytes) || 0);
+    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0 || remaining === 0) return;
     const key = merged.resourceGroup || '__global__';
     const state = this.states.get(key) ?? { active: 0, requestTimes: [], byteTokens: bytesPerSecond, byteUpdatedAt: Date.now() };
     this.states.set(key, state);
@@ -83,11 +83,13 @@ export class RateLimiter {
       const elapsed = Math.max(0, now - state.byteUpdatedAt) / 1000;
       state.byteTokens = Math.min(bytesPerSecond, state.byteTokens + elapsed * bytesPerSecond);
       state.byteUpdatedAt = now;
-      if (state.byteTokens >= amount) {
-        state.byteTokens -= amount;
-        return;
+      const consume = Math.min(state.byteTokens, remaining);
+      if (consume > 0) {
+        state.byteTokens -= consume;
+        remaining -= consume;
+        if (remaining <= 0) return;
       }
-      const deficit = amount - state.byteTokens;
+      const deficit = remaining - state.byteTokens;
       state.byteTokens = 0;
       await new Promise<void>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -103,7 +105,6 @@ export class RateLimiter {
         }, Math.max(1, Math.ceil((deficit / bytesPerSecond) * 1000)));
         merged.signal?.addEventListener('abort', onAbort, { once: true });
       });
-      if (amount > bytesPerSecond) return;
     }
   }
 

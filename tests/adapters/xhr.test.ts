@@ -38,3 +38,46 @@ test('xhr adapter reports upload progress and resolves response', async () => {
     globalThis.XMLHttpRequest = original;
   }
 });
+
+test('xhr adapter maps binary response type and credentials', async () => {
+  let instance: {
+    responseType: string;
+    withCredentials: boolean;
+    onreadystatechange: (() => void) | null;
+    readyState: number;
+  } | undefined;
+  class MockBinaryXHR {
+    upload = {};
+    onreadystatechange: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    ontimeout: (() => void) | null = null;
+    onprogress: ((event: ProgressEvent) => void) | null = null;
+    readyState = 0;
+    status = 200;
+    statusText = 'OK';
+    responseType = '';
+    withCredentials = false;
+    response = new Uint8Array([1, 2]).buffer;
+    constructor() { instance = this; }
+    open() { this.readyState = 1; }
+    setRequestHeader() {}
+    getAllResponseHeaders() { return 'content-type: application/octet-stream\r\n'; }
+    send() { this.readyState = 4; this.onreadystatechange?.(); }
+    abort() { this.onabort?.(); }
+  }
+  const original = globalThis.XMLHttpRequest;
+  globalThis.XMLHttpRequest = MockBinaryXHR as never;
+  try {
+    const response = await createXhrAdapter()({
+      url: 'https://example.test', method: 'GET', headers: new Headers(),
+      responseType: 'arrayBuffer', credentials: 'include',
+    } as never);
+    assert.equal(instance?.responseType, 'arraybuffer');
+    assert.equal(instance?.withCredentials, true);
+    assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [1, 2]);
+  } finally {
+    globalThis.XMLHttpRequest = original;
+  }
+});

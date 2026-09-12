@@ -1,5 +1,5 @@
 import type { AdapterConfig, HttpAdapterFactory } from './types.js';
-import { trackReadableStream } from '../transfer/progress.js';
+import { ProgressTracker, trackReadableStream } from '../transfer/progress.js';
 
 function contentLength(response: Response): number | undefined {
   const value = Number(response.headers.get('content-length'));
@@ -23,7 +23,18 @@ export function createFetchAdapter(): HttpAdapterFactory {
       keepalive: config.keepalive,
     });
     const headers = new Headers(response.headers);
-    if (!config.onDownloadProgress || !response.body) return response;
+    if (!response.body) {
+      if (config.onDownloadProgress) {
+        new ProgressTracker({
+          phase: 'download',
+          total: contentLength(response) ?? 0,
+          onProgress: config.onDownloadProgress,
+          progressInterval: config.progressInterval,
+        }).complete();
+      }
+      return response;
+    }
+    if (!config.onDownloadProgress && !(config.rateLimiter && config.rateLimit?.bytesPerSecond)) return response;
     const body = trackReadableStream(response.body, {
       phase: 'download',
       total: contentLength(response),

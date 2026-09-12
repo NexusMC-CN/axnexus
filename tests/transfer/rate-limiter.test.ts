@@ -39,6 +39,6 @@ test('cancels queued tasks without starting them', async () => {
 test('consumes bytes through a token bucket', async () => {
   const limiter = new RateLimiter({ bytesPerSecond: 1000 });
   const started = Date.now();
-  await limiter.consume(1001);
-  assert.equal(Date.now() - started >= 1, true);
+  await limiter.consume(1100);
+  assert.equal(Date.now() - started >= 80, true);
 });

@@ -23,3 +23,18 @@ test('fetch adapter reports download progress from response stream', async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+test('fetch adapter emits one completed event when response body is unavailable', async () => {
+  const originalFetch = globalThis.fetch;
+  const events: number[] = [];
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+  try {
+    await createFetchAdapter()({
+      url: 'https://example.test', method: 'GET', headers: new Headers(),
+      onDownloadProgress: (event) => events.push(event.loaded),
+    } as never);
+    assert.deepEqual(events, [0]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

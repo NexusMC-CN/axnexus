@@ -52,3 +52,15 @@ test('http2 adapter reuses session and returns h2 metadata', async () => {
   assert.equal(second.response.status, 200);
   assert.equal(sessions[0].streams[1].requestHeaders?.[':path'], '/other');
 });
+
+test('http2 adapter removes abort side effects after response body completes', async () => {
+  const session = new MockSession();
+  const controller = new AbortController();
+  const adapter = createNodeHttp2Adapter({ module: { connect: () => session, constants: { NGHTTP2_CANCEL: 8 } } });
+  const result = await adapter({
+    url: 'https://example.test/', method: 'GET', headers: new Headers(), signal: controller.signal,
+  } as never);
+  await result.response.text();
+  controller.abort();
+  assert.equal(session.streams[0].closeCode, undefined);
+});

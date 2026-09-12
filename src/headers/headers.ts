@@ -146,27 +146,20 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
     return Object.entries(this.toJSON(true)).map(([name, value]) => `${name}: ${value}`).join('\n');
   }
 
+  setAccept(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Accept', value, rewrite); }
+  getAccept(): unknown { return this.get('Accept'); }
+  hasAccept(): boolean { return this.has('Accept'); }
+  setContentType(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Content-Type', value, rewrite); }
+  getContentType(): unknown { return this.get('Content-Type'); }
+  hasContentType(): boolean { return this.has('Content-Type'); }
+  setAuthorization(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Authorization', value, rewrite); }
+  getAuthorization(): unknown { return this.get('Authorization'); }
+  hasAuthorization(): boolean { return this.has('Authorization'); }
+  setUserAgent(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('User-Agent', value, rewrite); }
+  getUserAgent(): unknown { return this.get('User-Agent'); }
+  hasUserAgent(): boolean { return this.has('User-Agent'); }
+
   *[Symbol.iterator](): IterableIterator<[string, HeaderValue]> {
     for (const entry of this.values.values()) yield [entry.name, entry.value];
   }
-}
-
-const shortcuts = {
-  Accept: 'Accept',
-  ContentType: 'Content-Type',
-  Authorization: 'Authorization',
-  UserAgent: 'User-Agent',
-} as const;
-
-for (const [method, header] of Object.entries(shortcuts)) {
-  const suffix = method;
-  (AxiosHeaders.prototype as unknown as Record<string, unknown>)[`set${suffix}`] = function (this: AxiosHeaders, value: HeaderValue, rewrite?: HeaderRewrite) {
-    return this.set(header, value, rewrite);
-  };
-  (AxiosHeaders.prototype as unknown as Record<string, unknown>)[`get${suffix}`] = function (this: AxiosHeaders) {
-    return this.get(header);
-  };
-  (AxiosHeaders.prototype as unknown as Record<string, unknown>)[`has${suffix}`] = function (this: AxiosHeaders) {
-    return this.has(header);
-  };
 }

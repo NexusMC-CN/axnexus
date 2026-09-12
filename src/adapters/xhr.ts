@@ -22,6 +22,9 @@ export function createXhrAdapter(): HttpAdapterFactory {
     const uploadTracker = config.onUploadProgress
       ? new ProgressTracker({ phase: 'upload', onProgress: config.onUploadProgress, progressInterval: config.progressInterval })
       : undefined;
+    const downloadTracker = config.onDownloadProgress
+      ? new ProgressTracker({ phase: 'download', onProgress: config.onDownloadProgress, progressInterval: config.progressInterval })
+      : undefined;
     let settled = false;
     const cleanup = () => {
       config.signal?.removeEventListener('abort', onAbort);
@@ -37,6 +40,7 @@ export function createXhrAdapter(): HttpAdapterFactory {
       settled = true;
       cleanup();
       uploadTracker?.complete();
+      downloadTracker?.complete();
       const body = xhr.responseType === 'arraybuffer' ? xhr.response : (xhr.response ?? xhr.responseText ?? '');
       const status = xhr.status === 1223 ? 204 : xhr.status;
       resolve(new Response(body, {
@@ -55,6 +59,10 @@ export function createXhrAdapter(): HttpAdapterFactory {
     xhr.onabort = () => fail(new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true }));
     xhr.ontimeout = () => fail(new HttpError('Request timed out', { code: 'ETIMEDOUT', isTimeout: true, retryable: true }));
     xhr.open(config.method, config.url, true);
+    xhr.responseType = config.responseType === 'arrayBuffer'
+      ? 'arraybuffer'
+      : config.responseType === 'blob' ? 'blob' : 'text';
+    xhr.withCredentials = config.credentials === 'include';
     if (config.timeout && config.timeout > 0) xhr.timeout = config.timeout;
     config.headers.forEach((value, name) => xhr.setRequestHeader(name, value));
     if (config.onUploadProgress && xhr.upload) {
@@ -62,6 +70,12 @@ export function createXhrAdapter(): HttpAdapterFactory {
         const total = event.lengthComputable ? event.total : undefined;
         uploadTracker?.setTotal(total);
         uploadTracker?.update(event.loaded, Date.now());
+      };
+    }
+    if (downloadTracker) {
+      xhr.onprogress = (event) => {
+        downloadTracker.setTotal(event.lengthComputable ? event.total : undefined);
+        downloadTracker.update(event.loaded, Date.now());
       };
     }
     config.signal?.addEventListener('abort', onAbort, { once: true });

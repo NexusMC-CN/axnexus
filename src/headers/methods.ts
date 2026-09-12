@@ -19,7 +19,7 @@ export function mergeMethodHeaders(
   rewrite: HeaderRewrite = true,
 ): AxiosHeaders {
   const result = new AxiosHeaders();
-  const source = defaults instanceof AxiosHeaders || defaults instanceof Headers
+  const source = defaults instanceof AxiosHeaders || defaults instanceof Headers || Array.isArray(defaults)
     ? new AxiosHeaders(defaults)
     : defaults;
   if (source) {

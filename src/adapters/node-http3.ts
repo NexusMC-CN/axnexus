@@ -18,9 +18,36 @@ export function createHttp3Adapter(transport?: QuicTransport): HttpAdapterFactor
   if (!transport) throw new HttpError('HTTP/3 transport is not available', { code: 'ERR_UNSUPPORTED_ADAPTER' });
   return async (config: AdapterConfig): Promise<AdapterResult> => {
     let result: Response | QuicResponse;
+    if (config.signal?.aborted) {
+      transport.cancel?.(config);
+      throw new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true });
+    }
     try {
-      result = await transport.request(config);
+      result = await new Promise<Response | QuicResponse>((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => config.signal?.removeEventListener('abort', onAbort);
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          transport.cancel?.(config);
+          reject(new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true }));
+        };
+        config.signal?.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve(transport.request(config)).then((value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(value);
+        }, (error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        });
+      });
     } catch (cause) {
+      if (cause instanceof HttpError && cause.code === 'ERR_CANCELED') throw cause;
       throw new HttpError('HTTP/3 request failed', { code: 'ERR_NETWORK', retryable: true, cause });
     }
     if (result instanceof Response) return { response: result, metadata: { protocol: 'h3' } };

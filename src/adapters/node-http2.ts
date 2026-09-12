@@ -86,20 +86,37 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
     const cancelCode = http2.constants?.NGHTTP2_CANCEL ?? 8;
     let settled = false;
     let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let bodyClosed = false;
+    let onAbort: (() => void) | undefined;
+    const cleanupAbort = () => {
+      if (onAbort) config.signal?.removeEventListener('abort', onAbort);
+    };
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         bodyController = controller;
         stream.on('data', (chunk: unknown) => controller.enqueue(toBytes(chunk)));
-        stream.on('end', () => controller.close());
-        stream.on('error', (error: unknown) => controller.error(error));
-        stream.on('aborted', () => controller.error(new Error('HTTP/2 stream aborted')));
+        stream.on('end', () => {
+          if (!bodyClosed) controller.close();
+          bodyClosed = true;
+          cleanupAbort();
+        });
+        stream.on('error', (error: unknown) => {
+          if (!bodyClosed) controller.error(error);
+          bodyClosed = true;
+          cleanupAbort();
+        });
+        stream.on('aborted', () => {
+          if (!bodyClosed) controller.error(new Error('HTTP/2 stream aborted'));
+          bodyClosed = true;
+          cleanupAbort();
+        });
       },
       cancel() {
         stream.close?.(cancelCode);
       },
     });
     const requestBody = endRequest(stream, config.body);
-    const response = await new Promise<Response>((resolve, reject) => {
+    const responsePromise = new Promise<Response>((resolve, reject) => {
       const onResponse = (headers: Record<string, string | number>) => {
         if (settled) return;
         settled = true;
@@ -115,12 +132,13 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
         if (!settled) reject(new HttpError('HTTP/2 stream failed', { code: 'ERR_NETWORK', retryable: true, cause: error }));
         else bodyController?.error(error);
       });
-      config.signal?.addEventListener('abort', () => {
+      onAbort = () => {
         stream.close?.(cancelCode);
         if (!settled) reject(new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true }));
-      }, { once: true });
+      };
+      config.signal?.addEventListener('abort', onAbort, { once: true });
     });
-    await requestBody;
+    const [response] = await Promise.all([responsePromise, requestBody]);
     return { response, metadata: { protocol: 'h2', timings: { startedAt: Date.now() } } };
   };
 }
