@@ -98,11 +98,12 @@ export function trackReadableStream(
           tracker.complete();
           controller.close();
         } else {
-          if (options.rateLimiter) await options.rateLimiter.consume(result.value.byteLength, options.rateLimit);
+          if (options.rateLimiter) await options.rateLimiter.consume(result.value.byteLength, { ...options.rateLimit, signal: options.rateLimit?.signal });
           tracker.update(tracker.loaded + result.value.byteLength);
           controller.enqueue(result.value);
         }
       } catch (error) {
+        try { await reader.cancel(error); } catch { /* stream already closed */ }
         controller.error(error);
       }
     },
