@@ -9,6 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./node-http2": {
+      "types": "./dist/node-http2.d.ts",
+      "import": "./dist/node-http2.js"
+    },
+    "./node-http3": {
+      "types": "./dist/node-http3.d.ts",
+      "import": "./dist/node-http3.js"
     }
   },
   "files": [

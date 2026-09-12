@@ -23,13 +23,16 @@ export type AdapterConfig = ResolvedRequestConfig & {
   maxBodySize?: number;
 };
 
-export type HttpAdapterFactory = (config: AdapterConfig) => Promise<Response>;
+export type HttpAdapterFactory = (config: AdapterConfig) => Promise<Response | AdapterResult>;
 
 export function hasAdapterCapability(capability: AdapterCapability): boolean {
   switch (capability) {
     case 'fetch': return typeof globalThis.fetch === 'function';
     case 'xhr': return typeof globalThis.XMLHttpRequest === 'function';
-    case 'http2': return false;
+    case 'http2': {
+      const processLike = (globalThis as { process?: { versions?: { node?: string } } }).process;
+      return Boolean(processLike?.versions?.node);
+    }
     case 'http3': return false;
   }
 }

@@ -26,3 +26,4 @@ export type { AdapterCapability, AdapterConfig, AdapterMetadata, AdapterResult, 
 export { readResponse, readErrorPayload } from './utils/response.js';
 export { encodeBody, isPlainBody } from './utils/body.js';
 export { sanitizeHeaderName, sanitizeHeaderValue } from './security/header-sanitizer.js';
+export type { HttpProtocol, ResponseTimings } from './types.js';
