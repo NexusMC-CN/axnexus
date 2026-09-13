@@ -149,10 +149,10 @@
 
 运行根入口、`./dist/adapters/node-http2.js` 和 `./dist/adapters/node-http3.js` 的 ESM import 检查，确认公开工厂和 adapter 导出存在。
 
-- [ ] **步骤 4：差异与远端检查**
+- [x] **步骤 4：差异与远端检查**
 
 运行 `git diff --check`、`git status --short --branch`、`git log -1 --oneline`；提交所有实现改动后推送 `git push origin main`，再用 `git ls-remote origin refs/heads/main` 核对远端指针。
 
-- [ ] **步骤 5：交付说明**
+- [x] **步骤 5：交付说明**
 
 报告 `client.ts` 最终行数、测试数量、包文件数量、提交哈希和仍保留的 HTTP/3 transport、XHR 字节限速边界。
