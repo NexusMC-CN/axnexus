@@ -47,6 +47,7 @@ export interface RetryOptions {
 }
 
 export type JsonParser = (text: string) => unknown | Promise<unknown>;
+export type StandardSchema<T = unknown> = import('./schema.js').StandardSchema<T>;
 export type JsonStringifier = (value: unknown) => string;
 export type RequestTransform = (data: unknown, headers: Headers) => unknown | Promise<unknown>;
 export type ResponseTransform = (data: unknown, response: Response) => unknown | Promise<unknown>;
@@ -74,6 +75,7 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
   throwHttpErrors?: boolean | ((status: number) => boolean);
   totalTimeout?: number;
   parseJson?: JsonParser;
+  schema?: StandardSchema;
   stringifyJson?: JsonStringifier;
   transformRequest?: RequestTransform | RequestTransform[];
   transformResponse?: ResponseTransform | ResponseTransform[];
@@ -169,6 +171,7 @@ export interface HttpClientConfig extends Omit<RequestConfig, 'method' | 'body' 
   throwHttpErrors?: boolean | ((status: number) => boolean);
   totalTimeout?: number;
   parseJson?: JsonParser;
+  schema?: StandardSchema;
   stringifyJson?: JsonStringifier;
   transformRequest?: RequestTransform | RequestTransform[];
   transformResponse?: ResponseTransform | ResponseTransform[];

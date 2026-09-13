@@ -394,6 +394,32 @@ test('maps asynchronous JSON parser failures to ERR_BAD_PAYLOAD', async () => {
   );
 });
 
+test('client validates JSON with a Standard Schema before response transforms', async () => {
+  const stages: string[] = [];
+  const client = createHttpClient({
+    adapter: async () => new Response('{"value":2}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+  const result = await client.get<{ value: number; transformed: boolean }>('/schema', {
+    schema: {
+      '~standard': {
+        validate(value: unknown) {
+          stages.push('schema');
+          return { value };
+        },
+      },
+    },
+    transformResponse: (data: { value: number }) => {
+      stages.push('transform');
+      return { ...data, transformed: true };
+    },
+  } as never);
+  assert.deepEqual(result, { value: 2, transformed: true });
+  assert.deepEqual(stages, ['schema', 'transform']);
+});
+
 test('merges request retry objects with client defaults and preserves explicit delay precedence', async () => {
   let attempts = 0;
   const delays: number[] = [];

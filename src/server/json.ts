@@ -1,5 +1,6 @@
-import type { JsonParser } from '../core/types.js';
+import type { JsonParser, StandardSchema } from '../core/types.js';
 import { HttpError } from '../core/errors.js';
+import { validateStandardSchema } from '../core/schema.js';
 import { AxiosHeaders, type HeaderInput } from '../headers/headers.js';
 import { combineSignals } from '../utils/signal.js';
 import { readResponse } from '../utils/response.js';
@@ -13,6 +14,7 @@ export interface FetchJsonOptions extends Omit<RequestInit, 'headers'> {
   maxBodySize?: number;
   fetch?: typeof globalThis.fetch;
   parseJson?: JsonParser;
+  schema?: StandardSchema;
 }
 
 export interface FetchJsonResult<T = unknown> {
@@ -36,6 +38,7 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
     maxBodySize,
     fetch: injectedFetch,
     parseJson = (text) => JSON.parse(text),
+    schema,
     signal,
     headers,
     ...init
@@ -57,7 +60,17 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
     if (!response.ok || response.status === 204 || response.headers.get('content-length') === '0') {
       return { data: null, status: response.status, response };
     }
-    const data = await readResponse(response, 'json', maxBodySize, parseJson, combined.signal) as T | null;
+    let data = await readResponse(response, 'json', maxBodySize, parseJson, combined.signal) as T | null;
+    if (data !== null && schema) {
+      try {
+        data = await validateStandardSchema(data, schema) as T;
+      } catch (cause) {
+        throw new HttpError('Response schema validation failed', {
+          code: 'ERR_SCHEMA_VALIDATION',
+          cause,
+        });
+      }
+    }
     return { data, status: response.status, response };
   } finally {
     if (timer) clearTimeout(timer);

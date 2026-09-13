@@ -12,6 +12,7 @@ export type HttpErrorCode =
   | 'ERR_RATE_LIMIT_QUEUE_TIMEOUT'
   | 'ERR_UNSUPPORTED_ADAPTER'
   | 'ERR_MAX_BODY_SIZE'
+  | 'ERR_SCHEMA_VALIDATION'
   | 'ERR_PROTOCOL_NEGOTIATION';
 
 export class HttpError<T = unknown> extends Error {

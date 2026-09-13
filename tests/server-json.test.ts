@@ -138,6 +138,38 @@ test('fetchJson maps parser failures to ERR_BAD_PAYLOAD', async () => {
   );
 });
 
+test('fetchJson validates parsed JSON with a Standard Schema', async () => {
+  const schema = {
+    '~standard': {
+      validate(value: unknown) {
+        return typeof value === 'object' && value !== null && 'ok' in value
+          ? { value }
+          : { issues: [{ message: 'expected an ok property' }] };
+      },
+    },
+  };
+  const data = await fetchJson<{ ok: boolean }>('https://api.example.test/schema', {
+    fetch: async () => new Response('{"ok":true}', { status: 200 }),
+    schema,
+  });
+  assert.deepEqual(data, { ok: true });
+});
+
+test('fetchJson maps Standard Schema failures to ERR_SCHEMA_VALIDATION', async () => {
+  const schema = {
+    '~standard': {
+      validate: async () => ({ issues: [{ message: 'invalid payload' }] }),
+    },
+  };
+  await assert.rejects(
+    fetchJson('https://api.example.test/schema-error', {
+      fetch: async () => new Response('{"ok":false}', { status: 200 }),
+      schema,
+    }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_SCHEMA_VALIDATION',
+  );
+});
+
 test('fetchJson reports missing fetch implementations clearly', async () => {
   const originalFetch = globalThis.fetch;
   try {

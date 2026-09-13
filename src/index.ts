@@ -3,6 +3,7 @@ export { createHttpClient } from './core/client.js';
 export type * from './core/types.js';
 export { HttpError, isHttpError } from './core/errors.js';
 export type { HttpErrorCode } from './core/errors.js';
+export type { StandardSchema, StandardSchemaIssue, StandardSchemaResult } from './core/schema.js';
 export {
   InterceptorManager,
   RequestInterceptorManager,

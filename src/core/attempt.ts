@@ -5,6 +5,7 @@ import { combineSignals, raceWithSignal, signalReason, TIMEOUT_REASON } from './
 import { responseInterceptorError, toError, HttpError } from './errors.js';
 import { applyInterceptorChain, applyInterceptorErrorChain, type InterceptorManager } from './interceptors.js';
 import { statusShouldThrow } from './retry.js';
+import { validateStandardSchema } from './schema.js';
 import type { RateLimiter } from '../transfer/rate-limiter.js';
 import type {
   AdapterResult,
@@ -143,10 +144,23 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
       config.parseJson,
       attemptConfig.signal,
     );
+    let validatedData = data;
+    if (validatedData !== null && config.schema) {
+      try {
+        validatedData = await raceWithSignal(validateStandardSchema(validatedData, config.schema), attemptConfig.signal);
+      } catch (cause) {
+        if (attemptConfig.signal?.aborted) throw cause;
+        throw new HttpError('Response schema validation failed', {
+          code: 'ERR_SCHEMA_VALIDATION',
+          config: attemptConfig,
+          cause,
+        });
+      }
+    }
     let transformedData: unknown;
     try {
       transformedData = await raceWithSignal(
-        applyResponseTransforms(data, config.transformResponse ?? defaults.transformResponse, rawResponse),
+        applyResponseTransforms(validatedData, config.transformResponse ?? defaults.transformResponse, rawResponse),
         attemptConfig.signal,
       );
     } catch (cause) {

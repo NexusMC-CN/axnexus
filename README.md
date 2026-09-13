@@ -216,7 +216,7 @@ try {
 
 ### `fetchJson` 的状态与解析
 
-运行时 schema 校验不绑定具体库；需要时可在 `transformResponse` 中接入 Zod、Valibot 或 Standard Schema。
+`fetchJson` 和客户端都支持可选的 Standard Schema 响应校验：解析 JSON 后先执行 `schema['~standard'].validate()`，通过后才运行 `transformResponse`；失败会抛出 `ERR_SCHEMA_VALIDATION`，不绑定 Zod、Valibot 等具体库。
 
 `fetchJson` 遵循 Fetch 的状态语义，不会因为非 2xx 自动抛错：非 2xx、`204`、`Content-Length: 0`、空字节或只有空白字符的响应都返回 `null`。需要同时取得状态码和原始 `Response` 时使用 `fetchJsonResult`；它会返回 `{ data, status, response }`。
 
@@ -417,6 +417,7 @@ import { fetchJson } from 'axnexus';
 const data = await fetchJson<{ ok: boolean }>('https://api.example.test/health', {
   cookie: request.headers.get('cookie') ?? undefined,
   timeout: 5_000,
+  schema: userSchema,
 });
 ```
 
