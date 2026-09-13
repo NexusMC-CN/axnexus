@@ -290,6 +290,62 @@ test('does not retry errors thrown by fulfilled response interceptors', async ()
   assert.equal(attempts, 1);
 });
 
+test('preserves cancellation while a fulfilled response interceptor is pending', async () => {
+  const controller = new AbortController();
+  const client = createHttpClient({
+    adapter: async () => jsonResponse({ ok: true }),
+  });
+  client.interceptors.response.use(() => new Promise<never>(() => {}));
+
+  const pending = client.get('/response-interceptor-cancel', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('response interceptor cancellation hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+});
+
+test('cancels while a request interceptor is pending', async () => {
+  const controller = new AbortController();
+  const client = createHttpClient({
+    adapter: async () => jsonResponse({ ok: true }),
+  });
+  client.interceptors.request.use(() => new Promise<never>(() => {}));
+
+  const pending = client.get('/request-interceptor-cancel', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('request interceptor cancellation hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+});
+
+test('cancels while a request transform is pending', async () => {
+  const controller = new AbortController();
+  const client = createHttpClient({
+    adapter: async () => jsonResponse({ ok: true }),
+  });
+
+  const pending = client.post('/request-transform-cancel', { value: 1 }, {
+    signal: controller.signal,
+    transformRequest: () => new Promise<never>(() => {}),
+  });
+  controller.abort();
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('request transform cancellation hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+});
+
 test('runs response rejected handlers once when a fulfilled handler fails', async () => {
   let rejectedRuns = 0;
   const client = createHttpClient({
@@ -392,6 +448,71 @@ test('reruns request interceptors for each retry attempt', async () => {
   assert.equal(interceptorRuns, 2);
 });
 
+test('honors a signal replaced by a retry request interceptor', async () => {
+  let attempts = 0;
+  let markSecondStarted!: () => void;
+  const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+  const firstController = new AbortController();
+  const secondController = new AbortController();
+  const client = createHttpClient({
+    retry: { limit: 1, delay: 0 },
+    adapter: async (config) => {
+      attempts += 1;
+      if (attempts === 1) return jsonResponse({ busy: true }, 503);
+      markSecondStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        if (config.signal?.aborted) {
+          reject(config.signal.reason);
+          return;
+        }
+        config.signal?.addEventListener('abort', () => {
+          reject(config.signal?.reason ?? new DOMException('aborted', 'AbortError'));
+        }, { once: true });
+      });
+    },
+  });
+  client.interceptors.request.use((config) => ({
+    ...config,
+    signal: attempts === 0 ? firstController.signal : secondController.signal,
+  }));
+
+  const pending = client.get('/retry-replaced-signal');
+  await secondStarted;
+  secondController.abort();
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('replaced signal was ignored')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+  assert.equal(attempts, 2);
+});
+
+test('does not start a retry when its replacement signal is already aborted', async () => {
+  let attempts = 0;
+  const firstController = new AbortController();
+  const replacementController = new AbortController();
+  replacementController.abort();
+  const client = createHttpClient({
+    retry: { limit: 1, delay: 0 },
+    adapter: async () => {
+      attempts += 1;
+      return jsonResponse({ busy: true }, 503);
+    },
+  });
+  client.interceptors.request.use((config) => ({
+    ...config,
+    signal: attempts === 0 ? firstController.signal : replacementController.signal,
+  }));
+
+  await assert.rejects(
+    client.get('/retry-preaborted-signal'),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+  assert.equal(attempts, 1);
+});
+
 test('retries from the intercepted config and keeps the request id stable', async () => {
   let attempts = 0;
   const urls: string[] = [];
@@ -458,6 +579,39 @@ test('reapplies request transforms when a request is retried', async () => {
     transformRequest: (data) => ({ ...(data as { value: number }), signed: true }),
   });
   assert.deepEqual(bodies, ['{"value":1,"signed":true}', '{"value":1,"signed":true}']);
+});
+
+test('cancels while a retry request transform is pending', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: 1,
+    retryDelay: 0,
+    retryUnsafeMethods: true,
+    adapter: async () => {
+      attempts += 1;
+      return jsonResponse({ busy: true }, 503);
+    },
+  });
+  client.interceptors.request.use((config) => ({
+    ...config,
+    transformRequest: attempts === 0 ? config.transformRequest : () => new Promise<never>(() => {}),
+  }));
+
+  const pending = client.post('/retry-transform-cancel', { value: 1 }, {
+    signal: controller.signal,
+    transformRequest: (data) => data,
+  });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  controller.abort();
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('retry transform cancellation hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+  assert.equal(attempts, 1);
 });
 
 test('does not retry non-replayable ReadableStream request bodies', async () => {

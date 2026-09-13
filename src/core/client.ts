@@ -421,6 +421,15 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     let stableRequestId = '';
     let generatedRequestIdForCache: string | undefined;
     let notified = false;
+    // Setup hooks run before the per-attempt controller exists. Keep a
+    // cancellation race around that phase so a caller can stop a pending
+    // interceptor or request transform as well as an adapter attempt.
+    const setupRateLimit = mergeRateLimitOptions(defaults.rateLimit, input.rateLimit);
+    const setupSignals = combineSignals([
+      defaults.signal,
+      input.signal,
+      setupRateLimit?.signal,
+    ]);
     const notifyError = (error: HttpError) => {
       if (notified) return;
       notified = true;
@@ -439,7 +448,10 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
         : '';
       const fallbackWasGenerated = Boolean(requestIdEnabled && !initialRequestIdPresent && fallbackRequestId);
       if (fallbackRequestId) initialHeaders.set('X-Request-Id', fallbackRequestId);
-      interceptedConfig = await applyInterceptorChain(requestInterceptors, { ...input, headers: initialHeaders });
+      interceptedConfig = await raceWithSignal(
+        applyInterceptorChain(requestInterceptors, { ...input, headers: initialHeaders }),
+        setupSignals.signal,
+      );
       // Normalize interceptor output through the same method-aware merge path.
       // A plain object can contain differently-cased copies of the same header;
       // constructing a native Headers object would concatenate those values.
@@ -454,7 +466,20 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
         ? ''
         : (interceptedRequestId ?? fallbackRequestId);
       generatedRequestIdForCache = fallbackWasGenerated && stableRequestId === fallbackRequestId ? fallbackRequestId : undefined;
-      resolved = await createResolvedConfig(defaults, interceptedConfig, false, true, true);
+      const resolvedSetupSignals = combineSignals([
+        setupSignals.signal,
+        defaults.signal,
+        interceptedConfig.signal,
+        mergeRateLimitOptions(defaults.rateLimit, interceptedConfig.rateLimit)?.signal,
+      ]);
+      try {
+        resolved = await raceWithSignal(
+          createResolvedConfig(defaults, interceptedConfig, false, true, true),
+          resolvedSetupSignals.signal,
+        );
+      } finally {
+        resolvedSetupSignals.cleanup();
+      }
       if (stableRequestId) resolved.headers.set('X-Request-Id', stableRequestId);
       const initialResolved = resolved;
       const retry = normalizeRetry(initialResolved.retry, defaults.retry);
@@ -483,25 +508,55 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
       let lastError: HttpError | undefined;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         if (attempt > 0) {
-          const retryInput = await raceWithSignal(applyInterceptorChain(requestInterceptors, {
-            ...interceptedConfig!,
-            headers: AxiosHeaders.from(interceptedConfig!.headers),
-          }), overallSignal.signal);
-          interceptedConfig = retryInput;
-          resolved = await createResolvedConfig(defaults, retryInput, false, true, true);
+          const retrySignals = combineSignals([
+            overallSignal.signal,
+            interceptedConfig?.signal,
+            interceptedConfig?.rateLimit?.signal,
+          ]);
+          try {
+            const retryInput = await raceWithSignal(applyInterceptorChain(requestInterceptors, {
+              ...interceptedConfig!,
+              headers: AxiosHeaders.from(interceptedConfig!.headers),
+            }), retrySignals.signal);
+            interceptedConfig = retryInput;
+            const retryConfigSignals = combineSignals([
+              retrySignals.signal,
+              defaults.signal,
+              retryInput.signal,
+              mergeRateLimitOptions(defaults.rateLimit, retryInput.rateLimit)?.signal,
+            ]);
+            try {
+              resolved = await raceWithSignal(
+                createResolvedConfig(defaults, retryInput, false, true, true),
+                retryConfigSignals.signal,
+              );
+            } finally {
+              retryConfigSignals.cleanup();
+            }
+          } catch (error) {
+            if (retrySignals.signal?.aborted && !overallSignal.signal?.aborted) {
+              throw new HttpError('Request canceled', {
+                code: 'ERR_CANCELED',
+                config: resolved ?? initialResolved,
+                isAbort: true,
+                cause: error,
+              });
+            }
+            throw error;
+          } finally {
+            retrySignals.cleanup();
+          }
           if (stableRequestId) resolved.headers.set('X-Request-Id', stableRequestId);
         }
         const attemptResolved: ResolvedRequestConfig = resolved || initialResolved;
-        // Use the request-wide signal for every attempt so cancellation from
-        // a queue/rate-limit policy also aborts an already-started adapter.
-        const externalSignal = overallSignal.signal;
-        if (externalSignal?.aborted) {
-          throw new HttpError('Request canceled', {
-            code: 'ERR_CANCELED',
-            config: attemptResolved,
-            isAbort: true,
-          });
-        }
+        // Preserve initial cancellation and total timeout signals, while also
+        // honoring a signal that a request interceptor supplies on a retry.
+        const attemptSignals = combineSignals([
+          overallSignal.signal,
+          attemptResolved.signal,
+          attemptResolved.rateLimit?.signal,
+        ]);
+        const externalSignal = attemptSignals.signal;
         const controller = externalSignal || timeoutMs > 0 || totalController ? new AbortController() : null;
         let timeoutTriggered = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -521,6 +576,14 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
         const startedAt = Date.now();
         let responseInterceptorChainStarted = false;
         try {
+          // Abort listeners do not fire when attached to an already-aborted
+          // signal. Check explicitly before invoking an adapter so a signal
+          // swapped in by a retry interceptor cannot let the attempt start.
+          if (externalSignal?.aborted) {
+            const reason = signalReason(externalSignal);
+            controller?.abort(reason);
+            throw reason;
+          }
           const adapterOutput = await raceWithSignal(adapter(attemptConfig), attemptConfig.signal);
           const rawResponse = adapterOutput instanceof Response
             ? adapterOutput
@@ -592,13 +655,21 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           responseInterceptorChainStarted = true;
           return await raceWithSignal(
             applyInterceptorChain(responseInterceptors, response, { reverse: true }),
-            overallSignal.signal,
+            externalSignal,
           );
         } catch (error) {
           if (responseInterceptorChainStarted) {
             // `applyInterceptorChain` already traverses rejected handlers after
             // a fulfilled handler fails. Running a second chain would duplicate
             // side effects and make recovery order differ from Promise semantics.
+            if (attemptConfig.signal?.aborted) {
+              throw toError(
+                error,
+                attemptConfig,
+                timeoutTriggered || totalTimeoutTriggered,
+                Boolean(externalSignal?.aborted),
+              );
+            }
             throw responseInterceptorError(error, attemptConfig);
           }
           const normalized = toError(
@@ -610,11 +681,14 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           try {
             const recovered = await raceWithSignal(
               applyInterceptorErrorChain(responseInterceptors, normalized, { reverse: true }),
-              overallSignal.signal,
+              externalSignal,
             );
             if ((recovered as unknown) !== normalized) return recovered;
           } catch (rejectedError) {
-            if (rejectedError !== normalized) {
+            // If cancellation won the race while the rejected handlers were
+            // being dispatched, keep the normalized cancellation instead of
+            // reporting the signal's DOMException as an interceptor failure.
+            if (rejectedError !== normalized && !attemptConfig.signal?.aborted) {
               throw responseInterceptorError(rejectedError, attemptConfig);
             }
           }
@@ -633,12 +707,12 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           const delay = calculateRetryDelay(retry, retryDelay, retryCount, normalized);
           if (!(await raceWithSignal(
             shouldRetry(normalized, attemptConfig, retry, retryOn, retryCount, delay),
-            overallSignal.signal,
+            externalSignal,
           ))) throw normalized;
           const retryContext: RetryContext = { error: normalized, retryCount, delay };
-          if (retry.beforeRetry) await raceWithSignal(retry.beforeRetry(retryContext), overallSignal.signal);
+          if (retry.beforeRetry) await raceWithSignal(retry.beforeRetry(retryContext), externalSignal);
           try {
-            await sleep(delay, overallSignal.signal);
+            await sleep(delay, externalSignal);
           } catch (sleepError) {
             if (totalTimeoutTriggered) {
               throw new HttpError('Request timed out', {
@@ -654,6 +728,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
         } finally {
           if (timer) clearTimeout(timer);
           if (externalSignal && controller) externalSignal.removeEventListener('abort', onAbort);
+          attemptSignals.cleanup();
         }
       }
       throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: initialResolved });
@@ -737,9 +812,19 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           };
         }
       }
-      const normalized = toError(error, fallbackConfig, false, Boolean(input.signal?.aborted));
+      const setupCanceled = Boolean(
+        setupSignals.signal?.aborted
+        || defaults.signal?.aborted
+        || input.signal?.aborted
+        || interceptedConfig?.signal?.aborted
+        || interceptedConfig?.rateLimit?.signal?.aborted
+        || setupRateLimit?.signal?.aborted,
+      );
+      const normalized = toError(error, fallbackConfig, false, setupCanceled);
       notifyError(normalized);
       throw normalized;
+    } finally {
+      setupSignals.cleanup();
     }
   };
 

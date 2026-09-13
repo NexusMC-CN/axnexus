@@ -213,7 +213,7 @@ controller.abort();
 await pending;
 ```
 
-外部取消会抛出 `ERR_CANCELED`，超时会抛出 `ETIMEDOUT`。取消请求不会自动重试。
+外部取消会抛出 `ERR_CANCELED`，并会尽早结束仍在等待的请求拦截器、请求转换器、限速排队、adapter、响应体读取和响应拦截器；超时会抛出 `ETIMEDOUT`。取消请求不会自动重试。
 
 ## 重试
 
