@@ -410,11 +410,7 @@ const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) })
 | HTTP/2 | 浏览器自行协商，客户端不强制 | 浏览器自行协商 | 默认 Fetch 不强制 | `axnexus/node-http2` | 不适用 |
 | HTTP/3 | 浏览器自行协商 | 浏览器自行协商 | 默认不启用 | 不适用 | `axnexus/node-http3` + QUIC transport |
 
-Node.js HTTP/2 和 HTTP/3 入口不会被默认入口加载；浏览器原生 Push、File System、Geolocation 和 Service Worker API 也不属于本包的传输层封装。
-
-## Web API 边界
-
-Push、File System、Geolocation 和 Service Worker 等 Web API 都带有权限申请、生命周期注册或用户代理策略，调用方式也不等同于 HTTP 请求。它们不放进 `axnexus` 的 HTTP 核心，避免把浏览器应用状态和通用传输混在一起；业务项目可以直接使用原生 API，并把得到的 `AbortSignal`、`File`、`Blob` 或 URL 传给本包。其他 MDN Web API 同样遵循这个边界，只有确实属于 HTTP 传输的能力才会进入本包。
+Node.js HTTP/2 和 HTTP/3 入口不会被默认入口加载。
 
 ## 与 Axios 的边界
 
