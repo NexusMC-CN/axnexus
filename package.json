@@ -28,7 +28,7 @@
     "build": "npm run clean && tsc -p tsconfig.json",
     "build:bun": "bun scripts/clean.mjs && bun x tsc -p tsconfig.json",
     "test": "npm run build && node --test --experimental-strip-types \"tests/**/*.test.ts\"",
-    "test:bun": "npm run build:bun && bun test tests",
+    "test:bun": "bun run build:bun && bun test tests",
     "prepack": "npm run build"
   },
   "devDependencies": {
