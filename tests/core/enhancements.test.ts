@@ -45,6 +45,74 @@ test('supports structured retry policy and invokes beforeRetry', async () => {
   assert.deepEqual(retryAttempts, [1]);
 });
 
+test('cancels a pending fulfilled response interceptor on single-attempt timeout', async () => {
+  const client = createHttpClient({
+    timeout: 10,
+    adapter: async () => new Response('{}', { status: 200 }),
+  });
+  client.interceptors.response.use(async () => new Promise(() => undefined));
+
+  await assert.rejects(
+    Promise.race([
+      client.get('/pending-response-interceptor'),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('request hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ETIMEDOUT',
+  );
+});
+
+test('cancels a pending rejected response interceptor on single-attempt timeout', async () => {
+  const client = createHttpClient({
+    timeout: 10,
+    adapter: async () => {
+      throw new Error('upstream failed');
+    },
+  });
+  client.interceptors.response.use(undefined, async () => new Promise(() => undefined));
+
+  await assert.rejects(
+    Promise.race([
+      client.get('/pending-error-interceptor'),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('request hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ETIMEDOUT',
+  );
+});
+
+test('cancels a pending response transform on single-attempt timeout', async () => {
+  const client = createHttpClient({
+    timeout: 10,
+    adapter: async () => new Response('{}', { status: 200 }),
+  });
+
+  await assert.rejects(
+    Promise.race([
+      client.get('/pending-response-transform', {
+        transformResponse: async () => new Promise(() => undefined),
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('request hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ETIMEDOUT',
+  );
+});
+
+test('cancels a pending JSON parser on single-attempt timeout', async () => {
+  const client = createHttpClient({
+    timeout: 10,
+    adapter: async () => new Response('{}', { status: 200 }),
+  });
+
+  await assert.rejects(
+    Promise.race([
+      client.get('/pending-json-parser', {
+        parseJson: async () => new Promise(() => undefined),
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('request hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ETIMEDOUT',
+  );
+});
+
 test('allows shouldRetry to opt unsafe methods into retries', async () => {
   let attempts = 0;
   const client = createHttpClient({

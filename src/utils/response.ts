@@ -1,6 +1,7 @@
 import { HttpError } from '../core/errors.js';
 import type { JsonParser, ResponseType } from '../core/types.js';
 
+/** `undefined`, negative, NaN and Infinity intentionally mean unlimited. */
 function assertSize(size: number, maxBodySize: number | undefined): void {
   if (maxBodySize !== undefined && maxBodySize >= 0 && size > maxBodySize) {
     throw new HttpError('Response body exceeds maxBodySize', { code: 'ERR_MAX_BODY_SIZE' });
@@ -138,8 +139,9 @@ export async function readResponse(
   if (!raw.trim()) return null;
   if (type === 'text') return raw;
   try {
-    return await parseJson(raw);
+    return await readAbortable(Promise.resolve().then(() => parseJson(raw)), signal);
   } catch (cause) {
+    if (signal?.aborted) throw cause;
     throw new HttpError('Response payload is not valid JSON', { code: 'ERR_BAD_PAYLOAD', cause });
   }
 }

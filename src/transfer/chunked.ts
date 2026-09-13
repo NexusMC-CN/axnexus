@@ -16,6 +16,8 @@ export interface ChunkPartErrorContext {
   error: unknown;
   /** One-based number of the failed attempt, including the initial attempt. */
   attempt: number;
+  /** The orchestration signal, when the caller supplied one. */
+  signal?: AbortSignal;
 }
 
 export interface ChunkUploadOptions<T> {
@@ -38,6 +40,50 @@ function abortError(): DOMException {
 
 function isAborted(signal: AbortSignal | undefined): boolean {
   return Boolean(signal?.aborted);
+}
+
+/**
+ * Stop waiting for user-provided async hooks when orchestration is canceled.
+ * The original promise is still observed so a late rejection cannot become
+ * an unhandled rejection; canceling the wait cannot cancel arbitrary user IO.
+ */
+function raceWithSignal<T>(value: PromiseLike<T> | T, signal: AbortSignal | undefined): Promise<T> {
+  const pending = Promise.resolve(value);
+  if (!signal) return pending;
+  if (signal.aborted) {
+    pending.catch(() => undefined);
+    return Promise.reject(abortError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      pending.catch(() => undefined);
+      return;
+    }
+    pending.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function waitForRetry(delay: number, signal: AbortSignal | undefined): Promise<void> {
@@ -120,12 +166,17 @@ export async function uploadChunks<T>(source: Uint8Array, options: ChunkUploadOp
         attempt += 1;
 
         try {
-          results[index] = await options.upload(part);
+          const result = await raceWithSignal(options.upload(part), options.signal);
+          // Cancellation wins over a late upload resolution. Do not publish
+          // a completed result or progress event after the orchestration
+          // signal has already been aborted.
+          if (isAborted(options.signal)) throw abortError();
+          results[index] = result;
         } catch (error) {
           // Cancellation is a control signal, not a transient part failure.
           if (isAborted(options.signal)) throw abortError();
 
-          await options.onPartError?.({ part, error, attempt });
+          await raceWithSignal(options.onPartError?.({ part, error, attempt, signal: options.signal }), options.signal);
           if (isAborted(options.signal)) throw abortError();
           if (failed) return;
 
@@ -134,7 +185,7 @@ export async function uploadChunks<T>(source: Uint8Array, options: ChunkUploadOp
             throw error;
           }
 
-          const delay = await resolveRetryDelay(options.retryDelay, attempt, error, part);
+          const delay = await raceWithSignal(resolveRetryDelay(options.retryDelay, attempt, error, part), options.signal);
           await waitForRetry(delay, options.signal);
           continue;
         }

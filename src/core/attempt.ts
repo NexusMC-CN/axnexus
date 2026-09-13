@@ -145,8 +145,12 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     );
     let transformedData: unknown;
     try {
-      transformedData = await applyResponseTransforms(data, config.transformResponse ?? defaults.transformResponse, rawResponse);
+      transformedData = await raceWithSignal(
+        applyResponseTransforms(data, config.transformResponse ?? defaults.transformResponse, rawResponse),
+        attemptConfig.signal,
+      );
     } catch (cause) {
+      if (attemptConfig.signal?.aborted) throw cause;
       throw new HttpError('Response transform failed', {
         code: 'ERR_TRANSFORM_RESPONSE',
         config: attemptConfig,
@@ -174,7 +178,7 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     responseInterceptorChainStarted = true;
     return await raceWithSignal(
       applyInterceptorChain(responseInterceptors, response, { reverse: true }),
-      externalSignal,
+      attemptConfig.signal,
     );
   } catch (error) {
     if (responseInterceptorChainStarted) {
@@ -200,16 +204,21 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     try {
       const recovered = await raceWithSignal(
         applyInterceptorErrorChain(responseInterceptors, normalized, { reverse: true }),
-        externalSignal,
+        attemptConfig.signal,
       );
       if ((recovered as unknown) !== normalized) return recovered;
     } catch (rejectedError) {
-      // If cancellation won the race while rejected handlers were running,
-      // keep the normalized cancellation instead of reporting a DOMException
-      // as an interceptor failure.
-      if (rejectedError !== normalized && !attemptConfig.signal?.aborted) {
-        throw responseInterceptorError(rejectedError, attemptConfig);
+      if (attemptConfig.signal?.aborted) {
+        // Preserve timeout/cancellation classification when the error
+        // interceptor itself is still pending as the attempt ends.
+        throw toError(
+          rejectedError,
+          attemptConfig,
+          timeoutTriggered || totalTimeoutTriggered(),
+          Boolean(externalSignal?.aborted),
+        );
       }
+      if (rejectedError !== normalized) throw responseInterceptorError(rejectedError, attemptConfig);
     }
     if (totalTimeoutTriggered()) {
       throw new HttpError('Request timed out', {

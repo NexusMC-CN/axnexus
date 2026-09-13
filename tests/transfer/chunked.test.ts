@@ -39,6 +39,48 @@ test('passes the cancellation signal to each chunk upload', async () => {
   assert.equal(receivedSignal, controller.signal);
 });
 
+test('does not commit progress after a chunk resolves after cancellation', async () => {
+  const controller = new AbortController();
+  const progress: Array<{ loaded: number; total: number }> = [];
+  let resolveUpload!: (value: string) => void;
+  const pending = uploadChunks(new Uint8Array([1]), {
+    chunkSize: 1,
+    signal: controller.signal,
+    onProgress: (loaded, total) => progress.push({ loaded, total }),
+    upload: () => new Promise<string>((resolve) => {
+      resolveUpload = resolve;
+    }),
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  resolveUpload('ok');
+
+  await assert.rejects(pending, (error: unknown) =>
+    error instanceof DOMException && error.name === 'AbortError');
+  assert.deepEqual(progress, []);
+});
+
+test('settles orchestration cancellation when an upload callback ignores the signal', async () => {
+  const controller = new AbortController();
+  const pending = uploadChunks(new Uint8Array([1]), {
+    chunkSize: 1,
+    signal: controller.signal,
+    upload: () => new Promise<string>(() => undefined),
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('upload cancellation hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof DOMException && error.name === 'AbortError',
+  );
+});
+
 test('retries only the failed chunk and reports each failed attempt', async () => {
   const attempts = new Map<number, number>();
   const failures: number[] = [];
@@ -57,4 +99,19 @@ test('retries only the failed chunk and reports each failed attempt', async () =
   assert.deepEqual(result, [0, 1]);
   assert.deepEqual([...attempts.entries()], [[0, 1], [1, 2]]);
   assert.deepEqual(failures, [1]);
+});
+
+test('exposes the orchestration signal to part error hooks', async () => {
+  const controller = new AbortController();
+  let contextSignal: AbortSignal | undefined;
+  await assert.rejects(uploadChunks(new Uint8Array([1]), {
+    chunkSize: 1,
+    signal: controller.signal,
+    onPartError: ({ part, signal }) => {
+      contextSignal = signal;
+      assert.equal(part.signal, controller.signal);
+    },
+    upload: async () => { throw new Error('failed'); },
+  }));
+  assert.equal(contextSignal, controller.signal);
 });

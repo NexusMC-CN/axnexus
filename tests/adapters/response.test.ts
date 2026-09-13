@@ -9,6 +9,14 @@ test('enforces max response body size before parsing', async () => {
   );
 });
 
+test('treats omitted and invalid maxBodySize values as unlimited', async () => {
+  const response = new Response('12345');
+  assert.equal(await readResponse(response, 'text'), '12345');
+  assert.equal(await readResponse(new Response('12345'), 'text', -1), '12345');
+  assert.equal(await readResponse(new Response('12345'), 'text', Number.NaN), '12345');
+  assert.equal(await readResponse(new Response('12345'), 'text', Number.POSITIVE_INFINITY), '12345');
+});
+
 test('treats all bodyless HTTP statuses as null responses', async () => {
   for (const status of [204, 205, 304]) {
     const response = new Response(null, { status });

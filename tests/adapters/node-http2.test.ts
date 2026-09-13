@@ -132,6 +132,154 @@ test('http2 adapter reuses session and returns h2 metadata', async () => {
   assert.equal(sessions[0].streams[1].requestHeaders?.[':path'], '/other');
 });
 
+test('isolates a failed stream while keeping the shared session usable', async () => {
+  const session = new ManualSession();
+  let connectCalls = 0;
+  const adapter = createNodeHttp2Adapter({
+    module: {
+      connect: () => {
+        connectCalls += 1;
+        return session;
+      },
+      constants: { NGHTTP2_CANCEL: 8 },
+    },
+  });
+
+  const firstPromise = adapter({ url: 'https://example.test/first', method: 'GET', headers: new Headers() } as never);
+  const secondPromise = adapter({ url: 'https://example.test/second', method: 'GET', headers: new Headers() } as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(session.streams.length, 2);
+
+  session.streams[0].emit('response', { ':status': 200 });
+  session.streams[1].emit('response', { ':status': 200 });
+  const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+  session.streams[0].emit('error', new Error('first stream failed'));
+  session.streams[1].emit('data', Buffer.from('second response'));
+  session.streams[1].emit('end');
+
+  await assert.rejects(first.response.text(), /HTTP\/2 stream failed/);
+  assert.equal(await second.response.text(), 'second response');
+
+  const thirdPromise = adapter({ url: 'https://example.test/third', method: 'GET', headers: new Headers() } as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(connectCalls, 1);
+  session.streams[2].emit('response', { ':status': 200 });
+  session.streams[2].emit('end');
+  const third = await thirdPromise;
+  assert.equal(await third.response.text(), '');
+});
+
+test('fails in-flight streams when the shared session itself errors and reconnects', async () => {
+  const sessions: ManualSession[] = [];
+  let connectCalls = 0;
+  const adapter = createNodeHttp2Adapter({
+    module: {
+      connect: () => {
+        connectCalls += 1;
+        const session = new ManualSession();
+        sessions.push(session);
+        return session;
+      },
+      constants: { NGHTTP2_CANCEL: 8 },
+    },
+  });
+
+  const first = adapter({ url: 'https://example.test/first', method: 'GET', headers: new Headers() } as never);
+  const second = adapter({ url: 'https://example.test/second', method: 'GET', headers: new Headers() } as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].streams.length, 2);
+
+  sessions[0].emit('error', new Error('session failed'));
+
+  const [firstError, secondError] = await Promise.all([
+    rejectsWithin(first),
+    rejectsWithin(second),
+  ]);
+  assert.equal((firstError as { code?: string }).code, 'ERR_NETWORK');
+  assert.equal((secondError as { code?: string }).code, 'ERR_NETWORK');
+
+  const third = adapter({ url: 'https://example.test/third', method: 'GET', headers: new Headers() } as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(connectCalls, 2);
+  sessions[1].streams[0].emit('response', { ':status': 200 });
+  sessions[1].streams[0].emit('end');
+  const thirdResult = await third;
+  assert.equal(thirdResult.response.status, 200);
+});
+
+test('fails in-flight streams when the shared session closes before response headers', async () => {
+  const session = new ManualSession();
+  const adapter = createNodeHttp2Adapter({
+    module: {
+      connect: () => session,
+      constants: { NGHTTP2_CANCEL: 8 },
+    },
+  });
+
+  const pending = adapter({ url: 'https://example.test/close', method: 'GET', headers: new Headers() } as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  session.emit('close');
+
+  const error = await rejectsWithin(pending);
+  assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
+});
+
+test('keeps a pending request body attached after an early bodyless response', async () => {
+  const session = new ManualSession();
+  const adapter = createNodeHttp2Adapter({
+    module: {
+      connect: () => session,
+      constants: { NGHTTP2_CANCEL: 8 },
+    },
+  });
+  const body = new ReadableStream<Uint8Array>({
+    pull: () => new Promise<void>(() => undefined),
+  });
+
+  const pending = adapter({
+    url: 'https://example.test/early-response',
+    method: 'POST',
+    headers: new Headers(),
+    body,
+  } as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  session.streams[0].emit('response', { ':status': 204 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  session.emit('close');
+
+  const error = await rejectsWithin(pending);
+  assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
+});
+
+test('aborts a pending request body when the shared session errors after an early bodyless response', async () => {
+  const session = new ManualSession();
+  const adapter = createNodeHttp2Adapter({
+    module: {
+      connect: () => session,
+      constants: { NGHTTP2_CANCEL: 8 },
+    },
+  });
+  const body = new ReadableStream<Uint8Array>({
+    pull: () => new Promise<void>(() => undefined),
+  });
+
+  const pending = adapter({
+    url: 'https://example.test/early-error',
+    method: 'POST',
+    headers: new Headers(),
+    body,
+  } as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  session.streams[0].emit('response', { ':status': 204 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  session.emit('error', new Error('session failed'));
+
+  const error = await rejectsWithin(pending);
+  assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
+});
+
 test('http2 adapter removes abort side effects after response body completes', async () => {
   const session = new MockSession();
   const controller = new AbortController();

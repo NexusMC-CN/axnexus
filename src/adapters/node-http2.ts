@@ -25,6 +25,14 @@ export interface NodeHttp2AdapterOptions {
   module?: Http2Module;
 }
 
+type SessionStreamFailure = (cause: unknown) => void;
+
+interface Http2SessionState {
+  active: Set<SessionStreamFailure>;
+  closed: boolean;
+  failure?: unknown;
+}
+
 function loadHttp2(): Promise<Http2Module> {
   const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<Http2Module>;
   return dynamicImport('node:http2');
@@ -222,8 +230,57 @@ async function endRequest(
 
 export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): HttpAdapterFactory {
   const sessions = new Map<string, Http2Session>();
+  const sessionStates = new WeakMap<Http2Session, Http2SessionState>();
   let modulePromise: Promise<Http2Module> | undefined;
   const getModule = () => modulePromise ??= Promise.resolve(options.module ?? loadHttp2());
+
+  const attachSessionState = (origin: string, session: Http2Session): Http2SessionState => {
+    const existing = sessionStates.get(session);
+    if (existing) return existing;
+
+    const state: Http2SessionState = { active: new Set(), closed: false };
+    sessionStates.set(session, state);
+    const discard = () => {
+      if (sessions.get(origin) === session) sessions.delete(origin);
+    };
+    const failActive = (cause: unknown) => {
+      if (state.failure === undefined) {
+        state.failure = cause ?? new Error('HTTP/2 session failed');
+      }
+      state.closed = true;
+      discard();
+      for (const fail of [...state.active]) {
+        try { fail(state.failure); } catch { /* one stream must not block the others */ }
+      }
+    };
+    session.on?.('error', (cause: unknown) => failActive(cause));
+    session.on?.('close', () => {
+      if (state.active.size > 0) {
+        failActive(state.failure ?? new Error('HTTP/2 session closed before streams completed'));
+      } else {
+        state.closed = true;
+        discard();
+      }
+    });
+    return state;
+  };
+
+  const registerSessionStream = (
+    state: Http2SessionState,
+    fail: SessionStreamFailure,
+  ): (() => void) => {
+    if (state.failure !== undefined || state.closed) {
+      fail(state.failure ?? new Error('HTTP/2 session is unavailable'));
+      return () => undefined;
+    }
+    state.active.add(fail);
+    let registered = true;
+    return () => {
+      if (!registered) return;
+      registered = false;
+      state.active.delete(fail);
+    };
+  };
 
   return async (config: AdapterConfig): Promise<AdapterResult> => {
     const startedAt = Date.now();
@@ -240,11 +297,11 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
     if (!session) {
       session = http2.connect(origin);
       sessions.set(origin, session);
-      const discard = () => {
-        if (sessions.get(origin) === session) sessions.delete(origin);
-      };
-      session.on?.('close', discard);
-      session.on?.('error', discard);
+    }
+    const sessionState = attachSessionState(origin, session);
+    if (sessionState.failure !== undefined || sessionState.closed) {
+      if (sessions.get(origin) === session) sessions.delete(origin);
+      throw networkError(sessionState.failure ?? new Error('HTTP/2 session is unavailable'));
     }
 
     const requestHeaders: Record<string, string> = {
@@ -258,6 +315,10 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
 
     const preparedBody = await prepareRequestBody(config.body, requestHeaders, config.method, signal);
     if (signal?.aborted) throw abortError(signal);
+    if (sessionState.failure !== undefined || sessionState.closed) {
+      if (sessions.get(origin) === session) sessions.delete(origin);
+      throw networkError(sessionState.failure ?? new Error('HTTP/2 session is unavailable'));
+    }
     const uploadTotal = declaredLength(requestHeaders) ?? byteLength(preparedBody);
     const uploadTracker = config.onUploadProgress && preparedBody !== undefined && preparedBody !== null
       ? new ProgressTracker({
@@ -278,6 +339,10 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
     let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
     let bodyClosed = false;
     let onAbort: (() => void) | undefined;
+    let unregisterSessionStream: () => void = () => undefined;
+    const maybeUnregisterSessionStream = () => {
+      if (requestBodyDone && bodyClosed) unregisterSessionStream();
+    };
 
     const closeTransport = () => {
       if (transportClosed) return;
@@ -295,6 +360,7 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
 
     const markBodyClosed = () => {
       bodyClosed = true;
+      maybeUnregisterSessionStream();
       cleanupAbort();
     };
 
@@ -320,14 +386,19 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
           }
         }
         if (!requestBodyAbort.signal.aborted) requestBodyAbort.abort(normalized);
-      } else if (!bodyClosed) {
-        bodyClosed = true;
-        bodyController?.error(normalized);
+      } else {
+        if (!bodyClosed) {
+          bodyClosed = true;
+          try { bodyController?.error(normalized); } catch { /* consumer already closed */ }
+        }
         if (!requestBodyAbort.signal.aborted) requestBodyAbort.abort(normalized);
       }
       if (close) closeTransport();
+      maybeUnregisterSessionStream();
       cleanupAbort();
     };
+
+    unregisterSessionStream = registerSessionStream(sessionState, failResponse);
 
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -340,6 +411,7 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
           if (bodyClosed) return;
           bodyClosed = true;
           try { controller.close(); } catch { /* consumer canceled */ }
+          maybeUnregisterSessionStream();
           cleanupAbort();
         });
         stream.on('error', (error: unknown) => {
@@ -357,6 +429,7 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
             // consumer waiting forever.
             bodyClosed = true;
             try { controller.error(networkError(new Error('HTTP/2 stream closed before end'))); } catch { /* consumer canceled */ }
+            maybeUnregisterSessionStream();
             cleanupAbort();
           }
         });
@@ -366,6 +439,7 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
         bodyClosed = true;
         if (!requestBodyAbort.signal.aborted) requestBodyAbort.abort(reason);
         closeTransport();
+        maybeUnregisterSessionStream();
         cleanupAbort();
       },
     });
@@ -436,9 +510,10 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
           bodyClosed = true;
         } else if (!bodyClosed) {
           bodyClosed = true;
-          bodyController?.error(error);
+          try { bodyController?.error(error); } catch { /* consumer already closed */ }
         }
         closeTransport();
+        maybeUnregisterSessionStream();
         cleanupAbort();
       };
       signal?.addEventListener('abort', onAbort, { once: true });
@@ -457,6 +532,7 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
       })
       .finally(() => {
         requestBodyDone = true;
+        maybeUnregisterSessionStream();
         cleanupAbort();
       });
 

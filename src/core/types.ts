@@ -93,6 +93,7 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
   onUploadProgress?: import('../transfer/progress.js').ProgressListener;
   onDownloadProgress?: import('../transfer/progress.js').ProgressListener;
   progressInterval?: number;
+  /** Maximum response payload size in bytes; omitted/invalid values mean unlimited. */
   maxBodySize?: number;
   rateLimit?: import('../transfer/rate-limiter.js').RateLimitOptions;
 }

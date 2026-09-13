@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { HttpError } from '../dist/index.js';
+import { AxiosHeaders, HttpError } from '../dist/index.js';
 import { fetchJson, fetchJsonResult } from '../dist/server/json.js';
 
 test('fetchJson forwards cookies and normalizes JSON responses', async () => {
@@ -37,6 +37,56 @@ test('fetchJsonResult preserves status and Headers instance values', async () =>
   assert.equal(seenHeaders?.get('cookie'), 'sid=abc');
 });
 
+test('fetchJson accepts AxiosHeaders and enforces maxBodySize', async () => {
+  let seenHeaders: Headers | undefined;
+  await assert.rejects(
+    fetchJson('https://api.example.test/large', {
+      headers: new AxiosHeaders({ 'X-Test': 'yes' }),
+      maxBodySize: 3,
+      fetch: async (_url, init) => {
+        seenHeaders = new Headers(init?.headers);
+        return new Response('{"ok":true}', { status: 200 });
+      },
+    }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_MAX_BODY_SIZE',
+  );
+  assert.equal(seenHeaders?.get('x-test'), 'yes');
+});
+
+test('fetchJson does not parse non-success payloads', async () => {
+  let parserCalls = 0;
+  const result = await fetchJsonResult('https://api.example.test/missing', {
+    parseJson: () => {
+      parserCalls += 1;
+      throw new Error('must not parse');
+    },
+    fetch: async () => new Response('{broken', { status: 500 }),
+  });
+  assert.equal(result.data, null);
+  assert.equal(result.status, 500);
+  assert.equal(parserCalls, 0);
+});
+
+test('fetchJson preserves external cancellation during parsing', async () => {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 2);
+  await assert.rejects(
+    fetchJson('https://api.example.test/cancelled', {
+      signal: controller.signal,
+      fetch: async () => new Response('{}', { status: 200 }),
+      parseJson: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        return { ok: true };
+      },
+    }),
+    (error: unknown) => {
+      assert.equal(error instanceof DOMException, true);
+      assert.equal((error as DOMException).name, 'AbortError');
+      return true;
+    },
+  );
+});
+
 test('fetchJson accepts the AVMCBBS-compatible timeoutMs alias', async () => {
   await assert.rejects(
     fetchJson('https://api.example.test/slow', {
@@ -59,6 +109,20 @@ test('fetchJson aborts a response body read when timeout expires', async () => {
         }), { status: 200 }),
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('body read hung')), 100)),
+    ]),
+    (error: unknown) => error instanceof DOMException && error.name === 'AbortError',
+  );
+});
+
+test('fetchJson aborts a pending JSON parser when timeout expires', async () => {
+  await assert.rejects(
+    Promise.race([
+      fetchJson('https://api.example.test/slow-parser', {
+        timeout: 5,
+        fetch: async () => new Response('{}', { status: 200 }),
+        parseJson: async () => new Promise(() => undefined),
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('parser hung')), 100)),
     ]),
     (error: unknown) => error instanceof DOMException && error.name === 'AbortError',
   );

@@ -18,14 +18,20 @@ export interface RequestLogRecord {
   error?: unknown;
 }
 
+/** Input schema accepted by `record`, `complete` and `error` before normalization. */
+export type RequestLogInput = Omit<RequestLogRecord, 'headers'> & {
+  headers?: HeaderInput;
+};
+
 export interface RequestLoggerOptions {
+  /** Additional header names to redact in addition to the built-in set. */
   redactHeaders?: string[];
   /** Clock used for lifecycle duration measurements. Defaults to Date.now. */
   now?: () => number;
 }
 
 /** Fields accepted by a lifecycle handle after a request has started. */
-export type RequestLifecycleInput = Omit<RequestLogRecord, 'phase' | 'method' | 'url' | 'headers'>;
+export type RequestLifecycleInput = Omit<RequestLogInput, 'phase' | 'method' | 'url' | 'headers'>;
 
 export interface RequestLogHandle {
   complete(input?: RequestLifecycleInput): void;
@@ -34,10 +40,12 @@ export interface RequestLogHandle {
 
 export interface RequestLogger {
   start(input: RequestStartRecord): RequestLogHandle;
+  /** Emit one complete record after normalizing method, headers and errors. */
+  record(input: RequestLogInput): void;
   /** Compatibility method for callers that emit a complete record themselves. */
-  complete(input: Omit<RequestLogRecord, 'phase'>): void;
+  complete(input: Omit<RequestLogInput, 'phase'>): void;
   /** Compatibility method for callers that emit an error record themselves. */
-  error(input: Omit<RequestLogRecord, 'phase'>): void;
+  error(input: Omit<RequestLogInput, 'phase'>): void;
 }
 
 function normalizeHeaders(headers: HeaderInput | undefined, redact: Set<string>): Record<string, string> {
@@ -49,23 +57,43 @@ function normalizeHeaders(headers: HeaderInput | undefined, redact: Set<string>)
 }
 
 function sanitizeError(error: unknown, redact: Set<string>): unknown {
-  if (!isHttpError(error)) return error;
-  return {
-    name: error.name,
-    message: error.message,
-    code: error.code,
-    ...(error.status === undefined ? {} : { status: error.status }),
-    isAbort: error.isAbort,
-    isTimeout: error.isTimeout,
-    retryable: error.retryable,
-    ...(error.config ? {
-      config: {
-        method: error.config.method,
-        url: error.config.url,
-        headers: normalizeHeaders(error.config.headers, redact),
-      },
-    } : {}),
-  };
+  if (isHttpError(error)) {
+    return {
+      name: error.name,
+      message: error.message,
+      code: error.code,
+      ...(error.status === undefined ? {} : { status: error.status }),
+      isAbort: error.isAbort,
+      isTimeout: error.isTimeout,
+      retryable: error.retryable,
+      ...(error.config ? {
+        config: {
+          method: error.config.method,
+          url: error.config.url,
+          headers: normalizeHeaders(error.config.headers, redact),
+        },
+      } : {}),
+    };
+  }
+
+  // Generic errors can carry arbitrary enumerable fields (including request
+  // configs). Keep the useful, stable fields and intentionally omit the rest.
+  if (error && typeof error === 'object') {
+    const source = error as Record<string, unknown>;
+    const output: Record<string, unknown> = {
+      name: typeof source.name === 'string' ? source.name : 'Error',
+    };
+    if (typeof source.message === 'string') output.message = source.message;
+    for (const key of ['code', 'status', 'isAbort', 'isTimeout', 'retryable']) {
+      const value = source[key];
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        output[key] = value;
+      }
+    }
+    return output;
+  }
+
+  return error;
 }
 
 function sanitizeRecordError<T extends { error?: unknown }>(record: T, redact: Set<string>): T {
@@ -77,7 +105,12 @@ export function createRequestLogger(
   emit: (record: RequestLogRecord) => void,
   options: RequestLoggerOptions = {},
 ): RequestLogger {
-  const redact = new Set((options.redactHeaders ?? ['authorization', 'cookie', 'set-cookie']).map((name) => name.toLowerCase()));
+  const redact = new Set([
+    'authorization',
+    'cookie',
+    'set-cookie',
+    ...(options.redactHeaders ?? []),
+  ].map((name) => name.toLowerCase()));
   const now = options.now ?? Date.now;
 
   const readNow = (): number => {
@@ -85,18 +118,26 @@ export function createRequestLogger(
     return Number.isFinite(value) ? value : Date.now();
   };
 
+  const normalizeRecord = (input: RequestLogInput): RequestLogRecord => {
+    const sanitized = sanitizeRecordError(input, redact);
+    return {
+      ...sanitized,
+      ...(typeof input.method === 'string' ? { method: input.method.toUpperCase() } : {}),
+      ...(input.headers ? { headers: normalizeHeaders(input.headers, redact) } : {}),
+    } as RequestLogRecord;
+  };
+
   const emitCompatibilityRecord = (
     phase: 'complete' | 'error',
-    input: Omit<RequestLogRecord, 'phase'>,
+    input: Omit<RequestLogInput, 'phase'>,
   ): void => {
-    emit({
-      ...sanitizeRecordError(input, redact),
-      ...(input.headers ? { headers: normalizeHeaders(input.headers, redact) } : {}),
-      phase,
-    });
+    emit(normalizeRecord({ ...input, phase }));
   };
 
   return {
+    record(input: RequestLogInput): void {
+      emit(normalizeRecord(input));
+    },
     start(input: RequestStartRecord): RequestLogHandle {
       const method = input.method.toUpperCase();
       const headers = normalizeHeaders(input.headers, redact);

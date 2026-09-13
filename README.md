@@ -199,6 +199,98 @@ try {
 | `ERR_MAX_BODY_SIZE` | 响应体超过 `maxBodySize` |
 | `ERR_RATE_LIMIT_QUEUE_TIMEOUT` | 请求在限速队列中超时 |
 | `ERR_UNSUPPORTED_ADAPTER` | 当前环境不支持所选 adapter |
+| `ERR_PROTOCOL_NEGOTIATION` | transport 无法协商请求的协议 |
+
+## 行为契约
+
+本节把几个容易被不同 adapter 或调用方式混淆的边界写成固定规则。它与导出的类型和测试一起构成公共 API 契约；业务项目不应依赖未列出的 adapter 私有细节。
+
+### 取消、超时与重试
+
+- `signal` 由调用方创建并传入请求配置。外部取消会返回 `ERR_CANCELED`，单次 `timeout` 会返回 `ETIMEDOUT`；同一请求中外部取消先发生时，取消优先于单次超时。
+- `timeout` 约束一次 adapter 尝试，包括响应体读取和响应拦截器等待；`totalTimeout` 还覆盖限速排队、重试判断、退避等待以及后续尝试。
+- 取消会尽早停止拦截器、`parseJson`/转换器、排队和 adapter 工作。adapter 已经把数据交给底层传输后，能否立刻停止仍取决于该 adapter 是否遵守 signal。
+- 重试策略使用本轮实际发送的 method/body 配置；错误对象里的 `error.config` 只用于诊断，不能作为是否可重试的依据。不可重放的 `ReadableStream` body 始终不自动重试。
+
+### `fetchJson` 的状态与解析
+
+`fetchJson` 遵循 Fetch 的状态语义，不会因为非 2xx 自动抛错：非 2xx、`204`、`Content-Length: 0`、空字节或只有空白字符的响应都返回 `null`。需要同时取得状态码和原始 `Response` 时使用 `fetchJsonResult`；它会返回 `{ data, status, response }`。
+
+成功状态的非空响应会交给 `parseJson`（默认 `JSON.parse`）。解析器抛错会转换为 `HttpError`，错误码为 `ERR_BAD_PAYLOAD`；`fetchJson` 的超时或外部 signal 取消仍按原生 `AbortError` 传播，不会转换成客户端请求使用的 `ETIMEDOUT` 或 `ERR_CANCELED`。`timeout` 和兼容 AVMCBBS 的 `timeoutMs` 都可用，二者同时提供时以 `timeoutMs` 为准。
+
+```typescript
+const result = await fetchJsonResult('/health', { timeout: 5_000 });
+if (result.status >= 400) {
+  // 非 2xx 不会自动抛错，状态码和原始 Response 仍在 result 中
+  console.warn('upstream status:', result.status);
+}
+```
+
+### 两层缓存与 clone
+
+客户端上的 `cache: { ttl }` 只提供 GET TTL 和进行中请求去重；独立的 `ResponseCache` 才提供 `staleWhileRevalidate`、`staleIfError` 和容量控制。两者不会共享条目，也不会把客户端的 signal、超时或进度事件吞进另一个调用方。
+
+```typescript
+const cache = new ResponseCache<{ items: string[] }>({ maxEntries: 128 });
+
+const value = await cache.getOrLoad('catalog', loadCatalog, {
+  ttl: 30_000,
+  staleWhileRevalidate: 120_000,
+  staleIfError: true,
+});
+```
+
+`ResponseCache` 当前的容量选项名是 `maxEntries`，表示最多保留的条目数，不是按字节计算的 `maxSize`；当前也没有公开的 `clone` 开关。写入和读取都会优先使用 `structuredClone`，再回退到 JSON clone；JSON fallback 可能丢失 `Date`、`Map` 等类型信息，两者都不支持的值会按原引用返回，因此缓存值仍应视为不可变数据。`maxEntries` 默认是 `256`。
+
+客户端 GET cache 的 key 使用最终 URL、method、响应类型、Fetch 行为选项和全部规范化请求头；只有客户端自动生成的 `X-Request-Id` 会被排除，调用方显式提供的同名 header 会参与区分。带 `signal`、`timeout`、`totalTimeout`、进度、限速或自定义解析/转换策略的请求会跳过这层 cache，所以它们不会加入另一个调用方的 in-flight 请求；直接使用 `GetRequestCache` 时，调用方的 `options.signal` 只取消自己的等待，不会取消共享 loader。`responseType: 'response'` 和完整响应方法也不进入 data cache。
+
+### `maxBodySize`
+
+`maxBodySize` 默认值是 `undefined`，表示不限制响应体大小；负数、`NaN` 和 `Infinity` 也按“不限制”处理。若响应声明了有效的 `Content-Length`，会在读取前先检查；可读流会逐块累计，超过上限立即停止读取、取消 reader 并抛出 `ERR_MAX_BODY_SIZE`；没有可读流的响应只能在完成缓冲后检查。错误响应的 payload 读取超过上限时会置为 `null`，不会覆盖原始 HTTP 状态错误。
+
+### `uploadChunks` 的 signal、重试与进度
+
+`uploadChunks` 的 `options.signal` 是编排器级 signal，同一个 signal 会放到每个 `ChunkUploadPart.signal` 上。上传回调必须主动把它交给底层请求，编排器才能取消已经在途的网络操作：
+
+```typescript
+const controller = new AbortController();
+
+const pending = uploadChunks(bytes, {
+  chunkSize: 5 * 1024 * 1024,
+  concurrency: 3,
+  signal: controller.signal,
+  retry: 2,
+  upload: ({ index, body, signal }) => putPart(index, body, { signal }),
+});
+
+// 在用户取消动作中调用：停止尚未开始的分片、重试等待和遵守 signal 的在途上传
+controller.abort();
+const parts = await pending;
+```
+
+取消会阻止新分片和下一次重试，并让编排 Promise 尽快 reject；即使上传回调不响应 signal，编排器也不会继续等待它，但底层网络操作仍只能由回调自行取消。上传回调已经 resolve 后若 signal 已取消，该分片不会再写入结果或触发成功进度。`onProgress` 只统计成功分片，空 source 不产生进度事件；已成功的分片不会自动回滚，服务端清理和合并由上传协议负责。`retry` 只针对当前失败分片，重试会复用同一个 `body`，上传回调不应修改它；`part.end` 是 end-exclusive。`chunkSize` 和 `concurrency` 会向下取整为正整数，非有限或非正值回退为 `1`；`retryDelay` 的非有限或负值会回退为 `0`；需要严格参数校验时应在调用前自行完成。`onPartError`、`retryDelay` 或 `onProgress` 抛出的异常会使整体 Promise reject，但已经开始的其他上传不会被自动回滚。
+
+### 请求日志 record
+
+`createRequestLogger` 的 `RequestLogInput` 字段如下，未列出的字段不会由 logger 自动推断；`logger.record(input)` 是统一入口，会规范化 method、headers 并脱敏 error：
+
+| 字段 | 说明 |
+| --- | --- |
+| `phase` | `start`、`complete` 或 `error` |
+| `method` / `url` | 请求身份；`start` 会把 method 规范化为大写 |
+| `headers` | 规范化后的 header；默认脱敏 `authorization`、`cookie`、`set-cookie` |
+| `status` | 完成或错误时可选的 HTTP 状态码 |
+| `duration` | 生命周期句柄自动计算的毫秒数，也可在完成时显式提供 |
+| `responseBytes` | 可选的响应字节数 |
+| `error` | 错误摘要；`HttpError.config.headers` 和普通错误的任意附加字段都会被安全裁剪 |
+
+`start()` 返回的一次性句柄只结束它自己对应的生命周期；顶层 `logger.complete()` 和 `logger.error()` 是 `record()` 的 phase 快捷方式，不会结束任何 `start()` 句柄，三者的 `headers` 都接受 `HeaderInput`。`redactHeaders` 是在内置敏感字段之上追加的 header 名称。
+
+### HTTP/2 session 与 stream
+
+Node HTTP/2 adapter 按 origin 复用 session，但每个请求仍有独立 stream。单个 stream 的错误、abort、请求取消或超时只关闭该 stream；正常情况下不会因为一个请求失败而主动关闭共享 session。session 自身发生 `error` 或 `close` 时会广播网络错误结束该 session 上的活动 stream，并从复用表移除，后续请求会建立新 session；调用方仍应分别处理每个请求的错误。
+
+Node HTTP/2 的 `ReadableStream` 请求体在读取期间会响应取消；这类不可重放请求不会自动重试。HTTP/3 不共享这套 session，实现细节由注入的 QUIC transport 负责。
 
 ## 取消和超时
 
@@ -307,7 +399,7 @@ const data = await cache.getOrLoad('catalog', loadCatalog, {
 });
 ```
 
-`fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求，会转发显式 `cookie`、处理空响应并允许注入 `fetch` 和 JSON parser；`timeout` 与 AVMCBBS 原实现的 `timeoutMs` 都可用：
+`fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求，会转发显式 `cookie`、处理空响应并允许注入 `fetch` 和 JSON parser；它的 `headers` 接受与主客户端相同的 `HeaderInput`（包括 `AxiosHeaders`），`maxBodySize` 默认不限制响应体；`timeout` 与 AVMCBBS 原实现的 `timeoutMs` 都可用：
 
 ```typescript
 import { fetchJson } from 'axnexus';
@@ -338,11 +430,11 @@ const parts = await uploadChunks(bytes, {
 });
 ```
 
-`retry` 只作用于失败的分片，不会重新上传已经成功的分片；`onPartError` 会收到每次失败（包括最终失败）。某个分片最终失败时整体 Promise reject，并停止调度新的分片，已在途的上传由调用方的 `signal` 决定是否继续。成功分片不会自动回滚，清理、断点续传和服务端合并由上传协议负责；上传回调应按分片 ID 保证幂等。
+`retry` 只作用于失败的分片，不会重新上传已经成功的分片；`onPartError` 会收到每次失败（包括最终失败）以及同一个编排 `signal`。某个分片最终失败时整体 Promise reject，并停止调度新的分片；已在途的上传只有在 `upload` 回调把 `part.signal` 传给底层请求并遵守它时才会停止。成功分片不会自动回滚，清理、断点续传和服务端合并由上传协议负责；上传回调应按分片 ID 保证幂等。
 
 ## 请求观测
 
-`createRequestLogger` 将请求开始、完成和错误统一成可注入的记录格式，并默认脱敏 `authorization`、`cookie` 和 `set-cookie`。`start` 返回一次性生命周期句柄，句柄会用 `options.now`（默认 `Date.now`）计算耗时；保留顶层 `complete`/`error` 方法用于手动上报：
+`createRequestLogger` 将请求开始、完成和错误统一成可注入的记录格式，并默认脱敏 `authorization`、`cookie` 和 `set-cookie`。`record`、`start`、`complete` 和 `error` 都遵守同一套输入与脱敏规则；`start` 返回一次性生命周期句柄，句柄会用 `options.now`（默认 `Date.now`）计算耗时：
 
 ```typescript
 import { createRequestLogger } from 'axnexus';

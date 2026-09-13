@@ -39,6 +39,7 @@ export type { FetchJsonOptions, FetchJsonResult } from './server/json.js';
 export { createRequestLogger } from './observability/request-logger.js';
 export type {
   RequestLogRecord,
+  RequestLogInput,
   RequestLoggerOptions,
   RequestStartRecord,
   RequestLogger,

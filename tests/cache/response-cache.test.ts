@@ -62,3 +62,26 @@ test('normalizes non-finite maxEntries and does not leak stale refresh rejection
   }
   assert.equal(unhandled, 0);
 });
+
+test('bounds entries and clones values on reads', async () => {
+  const cache = new ResponseCache<{ items: number[] }>({ maxEntries: 1 });
+  let firstLoads = 0;
+  const first = await cache.getOrLoad('first', async () => {
+    firstLoads += 1;
+    return { items: [1] };
+  }, { ttl: 10_000 });
+  first.items.push(99);
+
+  await cache.getOrLoad('second', async () => ({ items: [2] }), { ttl: 10_000 });
+  const secondRead = await cache.getOrLoad('second', async () => ({ items: [3] }), { ttl: 10_000 });
+  secondRead.items.push(99);
+  const secondAgain = await cache.getOrLoad('second', async () => ({ items: [4] }), { ttl: 10_000 });
+
+  assert.equal(cache.size(), 1);
+  assert.deepEqual(secondAgain, { items: [2] });
+  await cache.getOrLoad('first', async () => {
+    firstLoads += 1;
+    return { items: [5] };
+  }, { ttl: 10_000 });
+  assert.equal(firstLoads, 2);
+});

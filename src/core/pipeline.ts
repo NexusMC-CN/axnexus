@@ -225,7 +225,9 @@ export async function runRequestPipeline<T>(
             const retryCount = attempt + 1;
             const delay = calculateRetryDelay(retry, retryDelay, retryCount, normalized);
             if (!(await raceWithSignal(
-              shouldRetry(normalized, normalized.config ?? attemptResolved, retry, retryOn, retryCount, delay),
+              // Retry safety must follow the config actually sent to this
+              // attempt; adapter-supplied error.config remains diagnostic only.
+              shouldRetry(normalized, attemptResolved, retry, retryOn, retryCount, delay),
               attemptSignals.signal,
             ))) throw normalized;
             const retryContext: RetryContext = { error: normalized, retryCount, delay };

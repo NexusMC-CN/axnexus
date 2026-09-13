@@ -8,6 +8,7 @@ export type AdapterConfig = ResolvedRequestConfig & {
   onUploadProgress?: import('../transfer/progress.js').ProgressListener;
   onDownloadProgress?: import('../transfer/progress.js').ProgressListener;
   progressInterval?: number;
+  /** Maximum response payload size in bytes; response parsing enforces this limit. */
   maxBodySize?: number;
   rateLimiter?: import('../transfer/rate-limiter.js').RateLimiter;
 };

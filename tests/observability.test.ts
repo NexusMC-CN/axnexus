@@ -76,6 +76,51 @@ test('compatibility logger methods redact sensitive headers', () => {
   ]);
 });
 
+test('logger record emits the complete normalized record schema', () => {
+  const records: unknown[] = [];
+  const logger = createRequestLogger((record) => records.push(record));
+
+  logger.record({
+    phase: 'complete',
+    method: 'post',
+    url: '/record',
+    headers: new Headers({ Authorization: 'Bearer secret', 'X-Trace': 'ok' }),
+    status: 201,
+    duration: 12,
+    responseBytes: 4,
+  });
+
+  assert.deepEqual(records[0], {
+    phase: 'complete',
+    method: 'POST',
+    url: '/record',
+    headers: { authorization: '[REDACTED]', 'x-trace': 'ok' },
+    status: 201,
+    duration: 12,
+    responseBytes: 4,
+  });
+});
+
+test('logger compatibility methods accept native Headers and sanitize errors', () => {
+  const records: unknown[] = [];
+  const logger = createRequestLogger((record) => records.push(record));
+
+  logger.error({
+    method: 'GET',
+    url: '/record-error',
+    headers: new Headers({ Cookie: 'sid=secret' }),
+    error: Object.assign(new Error('failed'), { code: 'E_FAILED', secret: 'do-not-log' }),
+  });
+
+  assert.deepEqual(records[0], {
+    phase: 'error',
+    method: 'GET',
+    url: '/record-error',
+    headers: { cookie: '[REDACTED]' },
+    error: { name: 'Error', message: 'failed', code: 'E_FAILED' },
+  });
+});
+
 test('logger compatibility records redact sensitive headers', () => {
   const records: unknown[] = [];
   const logger = createRequestLogger((record) => records.push(record));
@@ -146,6 +191,55 @@ test('logger sanitizes nested HttpError configuration before emitting', () => {
     cookie: '[REDACTED]',
   });
   assert.equal(JSON.stringify(records).includes('nested-secret'), false);
+});
+
+test('logger sanitizes generic errors without leaking enumerable request data', () => {
+  const records: Array<{ error?: unknown }> = [];
+  const logger = createRequestLogger((record) => records.push(record));
+  const error = Object.assign(new Error('generic failure'), {
+    code: 'E_GENERIC',
+    config: {
+      headers: { Authorization: 'generic-secret' },
+    },
+    secret: 'generic-secret',
+  });
+
+  logger.error({ error });
+
+  assert.deepEqual(records[0]?.error, {
+    name: 'Error',
+    message: 'generic failure',
+    code: 'E_GENERIC',
+  });
+  assert.equal(JSON.stringify(records).includes('generic-secret'), false);
+});
+
+test('custom redaction headers extend the built-in sensitive header set', () => {
+  const records: unknown[] = [];
+  const logger = createRequestLogger((record) => records.push(record), {
+    redactHeaders: ['x-api-key'],
+  });
+
+  logger.start({
+    method: 'GET',
+    url: '/private',
+    headers: {
+      Authorization: 'Bearer secret',
+      Cookie: 'sid=secret',
+      'X-Api-Key': 'api-secret',
+    },
+  });
+
+  assert.deepEqual(records[0], {
+    phase: 'start',
+    method: 'GET',
+    url: '/private',
+    headers: {
+      authorization: '[REDACTED]',
+      cookie: '[REDACTED]',
+      'x-api-key': '[REDACTED]',
+    },
+  });
 });
 
 test('logger accepts AxiosHeaders and omits disabled header sentinels', () => {

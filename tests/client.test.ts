@@ -667,6 +667,68 @@ test('does not retry non-replayable ReadableStream request bodies', async () => 
   assert.equal(attempts, 1);
 });
 
+test('uses the runtime attempt method when a custom HttpError supplies another config', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: 1,
+    retryDelay: 0,
+    adapter: async (config) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new HttpError('adapter failed', {
+          code: 'ERR_NETWORK',
+          retryable: true,
+          config: { ...config, method: 'POST' },
+        });
+      }
+      return jsonResponse({ ok: true });
+    },
+  });
+
+  assert.deepEqual(await client.get('/custom-error-method', { bypassCache: true }), { ok: true });
+  assert.equal(attempts, 2);
+});
+
+test('uses the runtime body when a custom HttpError omits a stream body from its config', async () => {
+  let attempts = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+  });
+  const client = createHttpClient({
+    retry: 1,
+    retryDelay: 0,
+    retryUnsafeMethods: true,
+    adapter: async (config) => {
+      attempts += 1;
+      throw new HttpError('adapter failed', {
+        code: 'ERR_NETWORK',
+        retryable: true,
+        config: { ...config, body: undefined },
+      });
+    },
+  });
+
+  await assert.rejects(
+    client.post('/custom-error-stream', undefined, {
+      body,
+      retryUnsafeMethods: true,
+      bypassCache: true,
+    }),
+    (error: unknown) => {
+      assert.equal(error instanceof HttpError, true);
+      assert.equal((error as HttpError).code, 'ERR_NETWORK');
+      // The adapter's diagnostic config is preserved even though policy uses
+      // the actual runtime config passed to this attempt.
+      assert.equal((error as HttpError).config?.body, undefined);
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
 test('does not retry unsafe methods unless explicitly enabled', async () => {
   let defaultAttempts = 0;
   const defaultClient = createHttpClient({
