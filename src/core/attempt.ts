@@ -5,6 +5,7 @@ import { combineSignals, raceWithSignal, signalReason, TIMEOUT_REASON } from './
 import { responseInterceptorError, toError, HttpError } from './errors.js';
 import { applyInterceptorChain, applyInterceptorErrorChain, type InterceptorManager } from './interceptors.js';
 import { statusShouldThrow } from './retry.js';
+import type { RateLimiter } from '../transfer/rate-limiter.js';
 import type {
   AdapterResult,
   HttpAdapter,
@@ -26,7 +27,7 @@ export interface ExecuteAttemptOptions {
   timeoutMs: number;
   totalTimeoutEnabled: boolean;
   totalTimeoutTriggered: () => boolean;
-  rateLimiter?: unknown;
+  rateLimiter?: RateLimiter;
 }
 
 function responseMessage(payload: unknown, status: number): string {
@@ -89,7 +90,7 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     signal: controller?.signal,
   };
   if (rateLimiter !== undefined) {
-    (attemptConfig as ResolvedRequestConfig & { rateLimiter?: unknown }).rateLimiter = rateLimiter;
+    (attemptConfig as ResolvedRequestConfig & { rateLimiter?: RateLimiter }).rateLimiter = rateLimiter;
   }
   const startedAt = Date.now();
   let responseInterceptorChainStarted = false;

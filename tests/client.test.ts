@@ -513,6 +513,41 @@ test('does not start a retry when its replacement signal is already aborted', as
   assert.equal(attempts, 1);
 });
 
+test('cancels a retry delay when an interceptor-provided signal aborts', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  let markBeforeRetry!: () => void;
+  const beforeRetryCalled = new Promise<void>((resolve) => { markBeforeRetry = resolve; });
+  const client = createHttpClient({
+    retry: {
+      limit: 1,
+      delay: 1_000,
+      beforeRetry: () => {
+        markBeforeRetry();
+        setTimeout(() => controller.abort(), 10);
+      },
+    },
+    adapter: async () => {
+      attempts += 1;
+      return jsonResponse({ busy: true }, 503);
+    },
+  });
+  client.interceptors.request.use((config) => ({ ...config, signal: controller.signal }));
+
+  const pending = client.get('/cancel-interceptor-signal-delay');
+  await beforeRetryCalled;
+  const startedAt = Date.now();
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('retry delay cancellation hung')), 300)),
+    ]),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED',
+  );
+  assert.ok(Date.now() - startedAt < 300);
+  assert.equal(attempts, 1);
+});
+
 test('retries from the intercepted config and keeps the request id stable', async () => {
   let attempts = 0;
   const urls: string[] = [];

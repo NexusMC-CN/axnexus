@@ -434,7 +434,17 @@ Push、File System、Geolocation 和 Service Worker 等 Web API 都带有权限�
 
 ```text
 src/
-  core/       client、错误、拦截器和类型
+  core/
+    client.ts       实例工厂和公共方法适配
+    pipeline.ts     请求生命周期、调度、重试和最终错误归一化
+    attempt.ts      单次 adapter 调用、响应读取和响应拦截器
+    config.ts       配置合并、URL、请求体和转换器
+    control.ts      AbortSignal 组合、可取消竞态和延迟
+    retry.ts        重试判定、退避、抖动和 Retry-After
+    cache-policy.ts 缓存 key 和缓存资格判断
+    errors.ts       HttpError 和共享错误归一化
+    interceptors.ts 拦截器管理器与执行链
+    types.ts        客户端配置、响应和 adapter 类型
   headers/    AxiosHeaders、method defaults 和 presets
   transfer/   progress、限速、multipart 和 chunked 上传编排
   adapters/   fetch、xhr、node-http2、node-http3
