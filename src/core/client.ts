@@ -15,43 +15,24 @@ import {
   normalizeRetry,
   normalizeTimeout,
 } from './config.js';
+import {
+  calculateRetryDelay,
+  DEFAULT_RETRY_ON,
+  shouldRetry,
+  statusShouldThrow,
+} from './retry.js';
+import { resolveCachePolicy } from './cache-policy.js';
 import type {
   AdapterResult,
   HttpClient,
   HttpClientConfig,
   HttpResponse,
   RequestConfig,
-  RetryDelay,
   RetryContext,
   RetryOptions,
   ResolvedRequestConfig,
   ResponseType,
 } from './types.js';
-
-const DEFAULT_RETRY_ON = [408, 429, 500, 502, 503, 504];
-const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE']);
-
-function cacheKey(config: ResolvedRequestConfig, generatedRequestId?: string): string {
-  const headerEntries = Array.from(config.headers.entries())
-    .filter(([name, value]) => !(name === 'x-request-id' && generatedRequestId !== undefined && value === generatedRequestId))
-    .sort(([a], [b]) => a.localeCompare(b));
-  return JSON.stringify({
-    method: config.method,
-    url: config.url,
-    responseType: config.responseType ?? 'json',
-    credentials: config.credentials ?? '',
-    mode: config.mode ?? '',
-    redirect: config.redirect ?? '',
-    referrer: config.referrer ?? '',
-    referrerPolicy: config.referrerPolicy ?? '',
-    integrity: config.integrity ?? '',
-    keepalive: Boolean(config.keepalive),
-    fetchCache: config.fetchCache ?? config.requestCache ?? '',
-    priority: config.priority ?? '',
-    window: config.window === undefined ? '' : config.window,
-    headers: headerEntries,
-  });
-}
 
 function responseMessage(payload: unknown, status: number): string {
   if (payload && typeof payload === 'object') {
@@ -61,24 +42,6 @@ function responseMessage(payload: unknown, status: number): string {
   }
   if (typeof payload === 'string' && payload.trim()) return payload.trim().slice(0, 240);
   return `Request failed with HTTP ${status}`;
-}
-
-function retryAfterMs(response: HttpResponse<unknown> | undefined): number | undefined {
-  const raw = response?.headers.get('retry-after');
-  if (typeof raw !== 'string' || !raw.trim()) return undefined;
-  const seconds = Number(raw.trim());
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const timestamp = Date.parse(raw);
-  if (!Number.isFinite(timestamp)) return undefined;
-  return Math.max(0, timestamp - Date.now());
-}
-
-function statusShouldThrow(config: ResolvedRequestConfig, status: number): boolean {
-  if (typeof config.validateStatus === 'function') return !config.validateStatus(status);
-  const policy = config.throwHttpErrors;
-  if (typeof policy === 'function') return policy(status);
-  if (policy === false) return false;
-  return !(status >= 200 && status < 300);
 }
 
 async function readResponsePayload(response: Response, maxBodySize?: number, signal?: AbortSignal): Promise<unknown> {
@@ -162,60 +125,6 @@ function responseInterceptorError(error: unknown, config: ResolvedRequestConfig)
     retryable: false,
     cause: error,
   });
-}
-
-function isReadableStreamBody(value: unknown): boolean {
-  if (value === null || value === undefined) return false;
-  if (typeof ReadableStream === 'function' && value instanceof ReadableStream) return true;
-  return typeof (value as { getReader?: unknown }).getReader === 'function';
-}
-
-async function shouldRetry(
-  error: HttpError,
-  config: ResolvedRequestConfig,
-  retry: RetryOptions,
-  retryOn: Set<number>,
-  retryCount: number,
-  delay: number,
-): Promise<boolean> {
-  // Caller cancellation and non-replayable bodies are always hard stops.
-  if (error.isAbort || isReadableStreamBody(config.body)) return false;
-  if (typeof retry.shouldRetry === 'function') {
-    return retry.shouldRetry({ error, retryCount, delay });
-  }
-  if (error.retryable === false) return false;
-  const methods = new Set((retry.methods ?? []).map((method) => method.toUpperCase()));
-  const methodAllowed = methods.size > 0
-    ? methods.has(config.method)
-    : IDEMPOTENT_METHODS.has(config.method) || Boolean(config.retryUnsafeMethods);
-  if (!methodAllowed) return false;
-  const errorCodes = new Set(retry.errorCodes ?? []);
-  const defaultDecision = error.isTimeout || error.code === 'ERR_NETWORK'
-    ? true
-    : error.code === 'ERR_BAD_RESPONSE' && error.status !== undefined
-      ? (retry.statusCodes ? retry.statusCodes.includes(error.status) : retryOn.has(error.status))
-      : errorCodes.has(error.code);
-  return defaultDecision;
-}
-
-function calculateRetryDelay(
-  retry: RetryOptions,
-  retryDelay: RetryDelay | number | undefined,
-  retryCount: number,
-  error: HttpError,
-): number {
-  let delay = typeof retryDelay === 'function'
-    ? Math.max(0, Number(retryDelay(retryCount, error)) || 0)
-    : Math.max(0, Number(retryDelay) || 0) * retryCount;
-  const retryAfter = retry.respectRetryAfter === false ? undefined : retryAfterMs(error.response);
-  if (retryAfter !== undefined) delay = retryAfter;
-  if (retry.maxDelay !== undefined) delay = Math.min(delay, Math.max(0, retry.maxDelay));
-  if (retry.jitter) {
-    delay = typeof retry.jitter === 'function'
-      ? Math.max(0, Number(retry.jitter(delay, retryCount, error)) || 0)
-      : Math.random() * delay;
-  }
-  return delay;
 }
 
 export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
@@ -550,43 +459,25 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
       throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: initialResolved });
     };
 
-    const cacheSetting = initialResolved.cache ?? defaults.cache;
-    const cacheDeadline = Boolean(initialResolved.signal) || timeoutMs > 0 || totalTimeoutMs > 0;
-    const cachePolicyCompatible = initialResolved.maxBodySize === undefined
-      && !initialResolved.onDownloadProgress
-      && initialResolved.rateLimit === undefined
-      && !initialResolved.parseJson
-      && !initialResolved.transformResponse
-      && !initialResolved.validateStatus
-      && initialResolved.throwHttpErrors === undefined
-      // Custom Node transport objects are not stable/serializable cache keys.
-      && initialResolved.dispatcher === undefined
-      && initialResolved.agent === undefined;
-    const cacheEnabled = !fullResponse && initialResolved.method === 'GET'
-      && !initialResolved.bypassCache
-      && cacheSetting !== false
-      && cacheSetting !== undefined
-      && initialResolved.responseType !== 'response'
-      && !cacheDeadline
-      && cachePolicyCompatible
-      && responseInterceptors.getHandlers().length === 0
-      // Request interceptors are allowed to mutate URL, headers, body, and
-      // method on each retry. The key is established before `perform`, so
-      // sharing here could store a later attempt under an earlier key.
-      && requestInterceptors.getHandlers().length === 0
-      && initialResolved.body === undefined;
-    const ttl = typeof cacheSetting === 'object' ? Math.max(0, Number(cacheSetting.ttl) || 0) : 0;
+    const cachePolicy = resolveCachePolicy({
+      config: initialResolved,
+      defaultCache: defaults.cache,
+      fullResponse,
+      generatedRequestId: generatedRequestIdForCache,
+      requestInterceptorCount: requestInterceptors.getHandlers().length,
+      responseInterceptorCount: responseInterceptors.getHandlers().length,
+    });
     const runScheduled = () => rateLimiter.run(perform, {
       ...(initialResolved.rateLimit ?? {}),
       signal: overallSignal.signal,
     });
     try {
-      const result = cacheEnabled
-        ? await cache.getOrLoad(cacheKey(initialResolved, generatedRequestIdForCache), ttl, async () => (await runScheduled()).data)
+      const result = cachePolicy.enabled
+        ? await cache.getOrLoad(cachePolicy.key!, cachePolicy.ttl, async () => (await runScheduled()).data)
         : await runScheduled();
       if (initialResolved.method !== 'GET') cache.clear();
       if (fullResponse) return result as HttpResponse<T>;
-      return cacheEnabled ? result as T : (result as HttpResponse<T>).data;
+      return cachePolicy.enabled ? result as T : (result as HttpResponse<T>).data;
       } catch (error) {
         if (totalTimeoutTriggered) {
           throw new HttpError('Request timed out', {
