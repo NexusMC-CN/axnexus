@@ -24,6 +24,7 @@
 **修改：**
 
 - `src/core/client.ts`：删除已迁移的内部实现，只保留实例工厂和公共方法适配。
+- `src/core/errors.ts`：集中错误归一化和响应拦截器错误包装，供 attempt/pipeline 共享。
 - `src/core/types.ts`：增加仅供内部管线使用的依赖/结果类型（不从根入口导出）。
 - `README.md`：更新内部结构和取消边界说明。
 
@@ -90,7 +91,7 @@
 
 - [ ] **步骤 2：迁移单次执行逻辑**
 
-将 adapter 调用、bodyless status、`maxBodySize`、JSON/response transform、响应对象构造、fulfilled/rejected interceptor 链和 `toError`/`responseInterceptorError` 迁移到 `attempt.ts`，保留 response interceptor 只执行一次和取消分类逻辑。
+将 adapter 调用、bodyless status、`maxBodySize`、JSON/response transform 和响应对象构造迁移到 `attempt.ts`，并让它调用 `errors.ts` 提供的 `toError`/`responseInterceptorError`；保留 response interceptor 只执行一次和取消分类逻辑。
 
 - [ ] **步骤 3：用管线调用单次尝试**
 
