@@ -25,3 +25,15 @@ test('provides standard header method shortcuts', () => {
   assert.equal(headers.getAccept(), 'application/json');
   assert.equal(headers.hasAuthorization(), true);
 });
+
+test('supports CONNECT and TRACE method header groups', () => {
+  const connect = mergeMethodHeaders({ connect: { 'X-Method': 'connect' } }, 'CONNECT', undefined);
+  const trace = mergeMethodHeaders({ trace: { 'X-Method': 'trace' } }, 'TRACE', undefined);
+  assert.equal(connect.get('x-method'), 'connect');
+  assert.equal(trace.get('x-method'), 'trace');
+});
+
+test('accepts case-insensitive method group names', () => {
+  const merged = mergeMethodHeaders({ GET: { 'X-Method': 'get' } }, 'GET', undefined);
+  assert.equal(merged.get('x-method'), 'get');
+});

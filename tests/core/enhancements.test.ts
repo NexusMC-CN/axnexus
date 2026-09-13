@@ -68,6 +68,80 @@ test('allows shouldRetry to opt unsafe methods into retries', async () => {
   assert.equal(attempts, 2);
 });
 
+test('allows shouldRetry to override a non-retryable application error', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    adapter: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new HttpError('application busy', {
+          code: 'ERR_NETWORK',
+          retryable: false,
+        });
+      }
+      return new Response('{"ok":true}', { status: 200 });
+    },
+  });
+
+  const result = await client.get('/custom-retryable-error', {
+    retry: {
+      limit: 1,
+      shouldRetry: () => true,
+      delay: 0,
+    },
+  });
+  assert.deepEqual(result, { ok: true });
+  assert.equal(attempts, 2);
+});
+
+test('passes the calculated retry delay to shouldRetry', async () => {
+  let seenDelay = -1;
+  const client = createHttpClient({
+    retry: {
+      limit: 1,
+      delay: 25,
+      shouldRetry: (context) => {
+        seenDelay = context.delay;
+        return false;
+      },
+    },
+    adapter: async () => new Response('{"busy":true}', { status: 503 }),
+  });
+
+  await assert.rejects(client.get('/retry-delay-context'));
+  assert.equal(seenDelay, 25);
+});
+
+test('does not retry a cross-realm readable stream body', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: 1,
+    retryDelay: 0,
+    retryUnsafeMethods: true,
+    adapter: async () => {
+      attempts += 1;
+      return new Response('{"busy":true}', { status: 503 });
+    },
+  });
+  const crossRealmLikeStream = {
+    getReader() {
+      return {
+        read: async () => ({ done: true, value: undefined }),
+        releaseLock() {},
+      };
+    },
+  };
+
+  await assert.rejects(
+    client.post('/cross-realm-stream', undefined, {
+      body: crossRealmLikeStream as never,
+      retryUnsafeMethods: true,
+    }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ERR_BAD_RESPONSE',
+  );
+  assert.equal(attempts, 1);
+});
+
 test('enforces totalTimeout across retry delays', async () => {
   let attempts = 0;
   const client = createHttpClient({
@@ -86,6 +160,20 @@ test('enforces totalTimeout across retry delays', async () => {
     (error: unknown) => error instanceof HttpError && error.code === 'ETIMEDOUT',
   );
   assert.equal(attempts, 1);
+});
+
+test('classifies an adapter cancellation caused by timeout as ETIMEDOUT', async () => {
+  const client = createHttpClient({
+    adapter: (config) => new Promise<Response>((_resolve, reject) => {
+      config.signal?.addEventListener('abort', () => {
+        reject(new HttpError('adapter canceled', { code: 'ERR_CANCELED', isAbort: true }));
+      }, { once: true });
+    }),
+  });
+  await assert.rejects(
+    client.get('/adapter-timeout-classification', { timeout: 5 }),
+    (error: unknown) => error instanceof HttpError && error.code === 'ETIMEDOUT' && error.isTimeout,
+  );
 });
 
 test('uses an injected fetch implementation', async () => {

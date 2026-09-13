@@ -1,20 +1,8 @@
-import type { ResolvedRequestConfig } from '../core/types.js';
+import type { AdapterResult, ResolvedRequestConfig } from '../core/types.js';
+
+export type { AdapterMetadata, AdapterResult } from '../core/types.js';
 
 export type AdapterCapability = 'fetch' | 'xhr' | 'http2' | 'http3';
-
-export interface AdapterMetadata {
-  protocol?: 'h1' | 'h2' | 'h3' | 'unknown';
-  timings?: {
-    startedAt?: number;
-    headersAt?: number;
-    completedAt?: number;
-  };
-}
-
-export interface AdapterResult {
-  response: Response;
-  metadata?: AdapterMetadata;
-}
 
 export type AdapterConfig = ResolvedRequestConfig & {
   onUploadProgress?: import('../transfer/progress.js').ProgressListener;

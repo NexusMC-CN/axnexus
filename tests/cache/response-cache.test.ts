@@ -40,3 +40,25 @@ test('clear prevents an old in-flight load from repopulating the cache', async (
   assert.equal(await pending, 'stale');
   assert.equal(cache.size(), 0);
 });
+
+test('normalizes non-finite maxEntries and does not leak stale refresh rejections', async () => {
+  const cache = new ResponseCache<string>({ maxEntries: Number.NaN });
+  await cache.getOrLoad('one', async () => 'one', { ttl: 1_000 });
+  await cache.getOrLoad('two', async () => 'two', { ttl: 1_000 });
+  assert.equal(cache.size(), 2);
+
+  let now = 0;
+  const staleCache = new ResponseCache<string>({ now: () => now });
+  await staleCache.getOrLoad('stale', async () => 'v1', { ttl: 1, staleWhileRevalidate: 100 });
+  now = 2;
+  let unhandled = 0;
+  const onUnhandled = () => { unhandled += 1; };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    assert.equal(await staleCache.getOrLoad('stale', async () => { throw new Error('refresh failed'); }, { ttl: 1, staleWhileRevalidate: 100 }), 'v1');
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  assert.equal(unhandled, 0);
+});

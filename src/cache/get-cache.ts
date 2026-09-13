@@ -65,10 +65,16 @@ function waitFor<T>(promise: Promise<T>, options: CacheWaitOptions | undefined):
       reject(createWaitError('The operation timed out', 'TimeoutError'));
     };
 
-    if (signal?.aborted) return onAbort();
+    if (signal?.aborted) {
+      promise.catch(() => undefined);
+      return onAbort();
+    }
     if (deadline !== undefined) {
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return onDeadline();
+      if (remaining <= 0) {
+        promise.catch(() => undefined);
+        return onDeadline();
+      }
       timer = setTimeout(onDeadline, remaining);
     }
     signal?.addEventListener('abort', onAbort, { once: true });

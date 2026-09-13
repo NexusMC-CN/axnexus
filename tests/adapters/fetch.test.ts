@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { createFetchAdapter } from '../../dist/index.js';
+import { HttpError, createFetchAdapter } from '../../dist/index.js';
 
 test('fetch adapter reports download progress from response stream', async () => {
   const originalFetch = globalThis.fetch;
@@ -58,4 +58,109 @@ test('fetch download byte throttling observes request abort', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('fetch adapter resolves the default fetch implementation lazily', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  const adapter = createFetchAdapter();
+  globalThis.fetch = async () => {
+    calls.push('replacement');
+    return new Response('ok');
+  };
+  try {
+    await adapter({
+      url: 'https://example.test', method: 'GET', headers: new Headers(),
+    } as never);
+    assert.deepEqual(calls, ['replacement']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetch adapter reports a clear error when fetch is unavailable', async () => {
+  const originalFetch = globalThis.fetch;
+  const adapter = createFetchAdapter();
+  try {
+    Reflect.deleteProperty(globalThis, 'fetch');
+    await assert.rejects(
+      adapter({ url: 'https://example.test', method: 'GET', headers: new Headers() } as never),
+      (error: unknown) => error instanceof HttpError && error.code === 'ERR_UNSUPPORTED_ADAPTER',
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetch adapter enables Node duplex for readable stream uploads', async () => {
+  const originalFetch = globalThis.fetch;
+  let seenInit: RequestInit | undefined;
+  const adapter = createFetchAdapter(async (_input, init) => {
+    seenInit = init;
+    return new Response('ok');
+  });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+  });
+  try {
+    await adapter({
+      url: 'https://example.test', method: 'POST', headers: new Headers(), body,
+    } as never);
+    assert.equal((seenInit as RequestInit & { duplex?: string } | undefined)?.duplex, 'half');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetch adapter leaves progress totals unknown when content length is absent', async () => {
+  const originalFetch = globalThis.fetch;
+  const events: Array<{ total?: number; percent?: number }> = [];
+  globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2]));
+      controller.close();
+    },
+  }));
+  try {
+    const response = await createFetchAdapter()({
+      url: 'https://example.test', method: 'GET', headers: new Headers(),
+      onDownloadProgress: (event) => events.push(event),
+    } as never);
+    await response.arrayBuffer();
+    assert.equal(events.length, 1);
+    assert.equal('total' in events[0], false);
+    assert.equal('percent' in events[0], false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetch adapter forwards native and Node-specific request options', async () => {
+  let seenInit: (RequestInit & { dispatcher?: unknown; agent?: unknown; priority?: string; duplex?: string }) | undefined;
+  const dispatcher = { dispatch() {} };
+  const agent = { protocol: 'https:' };
+  const adapter = createFetchAdapter(async (_input, init) => {
+    seenInit = init as typeof seenInit;
+    return new Response('ok');
+  });
+
+  await adapter({
+    url: 'https://example.test',
+    method: 'GET',
+    headers: new Headers(),
+    fetchCache: 'no-store',
+    priority: 'high',
+    window: null,
+    dispatcher,
+    agent,
+  } as never);
+
+  assert.equal(seenInit?.cache, 'no-store');
+  assert.equal(seenInit?.priority, 'high');
+  assert.equal(seenInit?.window, null);
+  assert.equal(seenInit?.dispatcher, dispatcher);
+  assert.equal(seenInit?.agent, agent);
 });

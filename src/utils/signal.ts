@@ -5,7 +5,12 @@ export function combineSignals(signals: Array<AbortSignal | undefined>): { signa
   const listeners = active.map((signal) => {
     const onAbort = () => controller.abort(signal.reason);
     if (signal.aborted) onAbort();
-    else signal.addEventListener('abort', onAbort, { once: true });
+    else {
+      signal.addEventListener('abort', onAbort, { once: true });
+      // Close the check/register window for custom AbortSignal
+      // implementations and synchronous test doubles.
+      if (signal.aborted) onAbort();
+    }
     return { signal, onAbort };
   });
   return {

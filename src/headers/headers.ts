@@ -1,11 +1,20 @@
 import { HttpError } from '../core/errors.js';
+import type { HeaderDefaults } from './methods.js';
 
-export type HeaderValue = string | string[] | null | false | undefined;
+export type HeaderScalar = string | number | boolean;
+export type HeaderValue = HeaderScalar | HeaderScalar[] | null | undefined;
 export type RawHeaders = Record<string, HeaderValue>;
+export type HeaderIterable = Iterable<readonly [string, HeaderValue]>;
 export type HeaderMatcher = RegExp | ((value: string, name: string) => boolean);
 export type HeaderRewrite = boolean | ((value: HeaderValue, name: string) => boolean);
+export type HeaderParser = true | RegExp | ((value: string, name: string, headers: AxiosHeaders) => unknown);
 
-const INVALID_NAME = /[\r\n\0]/;
+export type HeaderInput = RawHeaders | HeaderDefaults | Headers | AxiosHeaders | HeadersInit | HeaderIterable | string;
+
+const GROUPED_HEADER_NAMES = new Set(['common', 'get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'connect', 'trace']);
+
+// RFC 9110 field-name token: reject whitespace and separators before Headers sees it.
+const INVALID_NAME = /[^!#$%&'*+.^_`|~0-9A-Za-z-]/;
 const INVALID_VALUE = /[\r\n\0]/;
 
 function normalizeName(name: string): string {
@@ -26,21 +35,103 @@ function normalizeValue(value: HeaderValue, name: string): HeaderValue {
   return Array.isArray(value) ? normalized : normalized[0];
 }
 
+function isHeaderIterable(value: unknown): value is HeaderIterable {
+  return typeof value !== 'string'
+    && Boolean(value)
+    && typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function';
+}
+
+function parseParameters(value: string, includeBareTokens = false): Record<string, string | undefined> {
+  const result = Object.create(null) as Record<string, string | undefined>;
+  let segment = '';
+  let quoted = false;
+  let escaped = false;
+  const segments: string[] = [];
+  for (const character of value) {
+    if (escaped) {
+      segment += character;
+      escaped = false;
+      continue;
+    }
+    if (character === '\\' && quoted) {
+      segment += character;
+      escaped = true;
+      continue;
+    }
+    if (character === '"') quoted = !quoted;
+    if (!quoted && (character === ';' || character === ',' || /\s/.test(character))) {
+      segments.push(segment);
+      segment = '';
+    } else {
+      segment += character;
+    }
+  }
+  segments.push(segment);
+  for (const item of segments) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf('=');
+    const rawName = (separator < 0 ? trimmed : trimmed.slice(0, separator)).trim().toLowerCase();
+    if (!rawName || rawName === '__proto__' || rawName === 'constructor' || rawName === 'prototype') continue;
+    if (separator < 0) {
+      if (includeBareTokens) result[rawName] = undefined;
+      continue;
+    }
+    let rawValue = trimmed.slice(separator + 1).trim();
+    if (rawValue.startsWith('"') && rawValue.endsWith('"') && rawValue.length >= 2) {
+      rawValue = rawValue.slice(1, -1).replace(/\\([\\"])/g, '$1');
+    }
+    result[rawName] = rawValue;
+  }
+  return result;
+}
+
 function matches(matcher: HeaderMatcher | undefined, value: string, name: string): boolean {
   if (!matcher) return true;
   if (matcher instanceof RegExp) {
     matcher.lastIndex = 0;
     const valueMatch = matcher.test(value);
     matcher.lastIndex = 0;
-    return valueMatch || matcher.test(name);
+    const nameMatch = matcher.test(name);
+    matcher.lastIndex = 0;
+    return valueMatch || nameMatch;
   }
   return matcher(value, name);
+}
+
+function matchesName(matcher: HeaderMatcher | undefined, name: string): boolean {
+  if (!matcher) return true;
+  if (matcher instanceof RegExp) {
+    matcher.lastIndex = 0;
+    const matched = matcher.test(name);
+    matcher.lastIndex = 0;
+    return matched;
+  }
+  // `clear` matchers are defined in terms of header names, not values.
+  return matcher('', name);
 }
 
 export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   private readonly values = new Map<string, { name: string; value: HeaderValue }>();
 
-  constructor(headers?: RawHeaders | Headers | AxiosHeaders | HeadersInit | string) {
+  static from<T extends HeaderInput | null | undefined>(headers?: T): T extends AxiosHeaders ? T : AxiosHeaders {
+    if (headers instanceof AxiosHeaders) return headers as T extends AxiosHeaders ? T : AxiosHeaders;
+    return new AxiosHeaders(headers ?? undefined) as T extends AxiosHeaders ? T : AxiosHeaders;
+  }
+
+  static concat(...targets: Array<HeaderInput | null | undefined>): AxiosHeaders {
+    const result = new AxiosHeaders();
+    for (const target of targets) {
+      if (target !== undefined && target !== null) result.set(target);
+    }
+    return result;
+  }
+
+  static parseParameters(value: string): Record<string, string | undefined> {
+    return parseParameters(value);
+  }
+
+  constructor(headers?: HeaderInput | null) {
     if (!headers) return;
     if (headers instanceof AxiosHeaders) {
       for (const [name, value] of headers) this.set(name, value);
@@ -53,27 +144,47 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
       }
       return;
     }
-    if (headers instanceof Headers || Array.isArray(headers)) {
-      new Headers(headers).forEach((value, name) => this.set(name, value));
+    if (isHeaderIterable(headers)) {
+      for (const pair of headers) {
+        if (!pair || pair.length < 2) continue;
+        this.set(String(pair[0]), pair[1]);
+      }
     } else {
-      for (const [name, value] of Object.entries(headers)) this.set(name, value);
+      for (const [name, value] of Object.entries(headers)) {
+        if (GROUPED_HEADER_NAMES.has(name.toLowerCase()) && value && typeof value === 'object' && !Array.isArray(value)) {
+          for (const [nestedName, nestedValue] of Object.entries(value)) this.set(nestedName, nestedValue as HeaderValue);
+        } else {
+          this.set(name, value as HeaderValue);
+        }
+      }
     }
   }
 
   set(name: string, value: HeaderValue, rewrite?: HeaderRewrite): this;
-  set(headers: RawHeaders | Headers | AxiosHeaders | HeadersInit, rewrite?: HeaderRewrite): this;
-  set(nameOrHeaders: string | RawHeaders | Headers | AxiosHeaders | HeadersInit, valueOrRewrite?: HeaderValue | HeaderRewrite, rewrite: HeaderRewrite = true): this {
+  set(headers: HeaderInput, rewrite?: HeaderRewrite): this;
+  set(nameOrHeaders: HeaderInput, valueOrRewrite?: HeaderValue | HeaderRewrite, rewrite?: HeaderRewrite): this {
+    if (typeof nameOrHeaders === 'string' && valueOrRewrite === undefined && nameOrHeaders.includes(':')) {
+      for (const line of nameOrHeaders.split(/\r?\n/)) {
+        const separator = line.indexOf(':');
+        if (separator > 0) this.set(line.slice(0, separator), line.slice(separator + 1).trim(), rewrite);
+      }
+      return this;
+    }
     if (typeof nameOrHeaders !== 'string') {
       const target = new AxiosHeaders(nameOrHeaders);
-      for (const [name, value] of target) this.set(name, value, valueOrRewrite as HeaderRewrite ?? true);
+      for (const [name, value] of target) this.set(name, value, valueOrRewrite as HeaderRewrite);
       return this;
     }
     const name = normalizeName(nameOrHeaders);
     const value = normalizeValue(valueOrRewrite as HeaderValue, name);
     const existing = this.values.get(name);
-    const shouldRewrite = typeof rewrite === 'function' ? rewrite(existing?.value, name) : rewrite;
+    const shouldRewrite = typeof rewrite === 'function'
+      ? rewrite(existing?.value, name)
+      : rewrite === undefined
+        ? existing?.value !== false
+        : rewrite;
     if (existing && !shouldRewrite) return this;
-    if (value === undefined || value === null || value === false) {
+    if (value === undefined || value === null) {
       this.values.delete(name);
       return this;
     }
@@ -81,19 +192,35 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
     return this;
   }
 
-  get(name: string, parser?: RegExp | ((value: string) => unknown)): unknown {
+  get(name: string): string | undefined;
+  get(name: string, parser: true): Record<string, string | undefined> | undefined;
+  get(name: string, parser: RegExp): RegExpExecArray | null | undefined;
+  get<T>(name: string, parser: (value: string, name: string, headers: AxiosHeaders) => T): T | undefined;
+  get(name: string, parser?: HeaderParser): unknown {
     const entry = this.values.get(normalizeName(name));
     if (!entry) return undefined;
+    if (entry.value === false) return undefined;
     const value = Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value);
     if (!parser) return value;
-    if (parser instanceof RegExp) return parser.exec(value);
-    return parser(value);
+    if (parser === true) return parseParameters(value, true);
+    if (parser instanceof RegExp) {
+      parser.lastIndex = 0;
+      const result = parser.exec(value);
+      parser.lastIndex = 0;
+      return result;
+    }
+    return parser(value, entry.name, this);
   }
 
   has(name: string, matcher?: HeaderMatcher): boolean {
     const entry = this.values.get(normalizeName(name));
     if (!entry) return false;
     return matches(matcher, Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value), entry.name);
+  }
+
+  /** Returns true when a header was explicitly set to Axios' `false` opt-out. */
+  isDisabled(name: string): boolean {
+    return this.values.get(normalizeName(name))?.value === false;
   }
 
   delete(name: string | string[], matcher?: HeaderMatcher): boolean {
@@ -112,7 +239,7 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   clear(matcher?: HeaderMatcher): boolean {
     let changed = false;
     for (const [key, entry] of this.values) {
-      if (matches(matcher, Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value), entry.name)) {
+      if (matchesName(matcher, entry.name)) {
         this.values.delete(key);
         changed = true;
       }
@@ -127,17 +254,34 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
     return this;
   }
 
-  concat(...targets: Array<RawHeaders | Headers | AxiosHeaders>): AxiosHeaders {
+  concat(...targets: Array<HeaderInput | null | undefined>): AxiosHeaders {
     const result = new AxiosHeaders(this);
-    for (const target of targets) result.set(new AxiosHeaders(target));
+    for (const target of targets) if (target !== undefined && target !== null) result.set(new AxiosHeaders(target));
     return result;
+  }
+
+  toHeaders(): Headers {
+    return new Headers(this.toJSON(true) as HeadersInit);
+  }
+
+  forEach(callback: (value: string, name: string, headers: this) => void, thisArg?: unknown): void {
+    for (const [name, value] of this) {
+      if (value === false || value === null || value === undefined) continue;
+      const normalized = Array.isArray(value) ? value.join(', ') : String(value);
+      callback.call(thisArg, normalized, name, this);
+    }
   }
 
   toJSON(asStrings = false): Record<string, string | string[]> {
     const result: Record<string, string | string[]> = {};
     for (const entry of this.values.values()) {
       if (entry.value === undefined || entry.value === null || entry.value === false) continue;
-      result[entry.name] = asStrings && Array.isArray(entry.value) ? entry.value.join(', ') : entry.value;
+      const value = entry.value;
+      const isArray = Array.isArray(value);
+      const normalized = isArray
+        ? (value as HeaderScalar[]).map((item) => String(item))
+        : String(value);
+      result[entry.name] = asStrings && isArray ? (normalized as string[]).join(', ') : normalized;
     }
     return result;
   }
@@ -147,17 +291,23 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   }
 
   setAccept(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Accept', value, rewrite); }
-  getAccept(): unknown { return this.get('Accept'); }
+  getAccept(): string | undefined { return this.get('Accept'); }
   hasAccept(): boolean { return this.has('Accept'); }
   setContentType(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Content-Type', value, rewrite); }
-  getContentType(): unknown { return this.get('Content-Type'); }
+  getContentType(): string | undefined { return this.get('Content-Type'); }
   hasContentType(): boolean { return this.has('Content-Type'); }
   setAuthorization(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Authorization', value, rewrite); }
-  getAuthorization(): unknown { return this.get('Authorization'); }
+  getAuthorization(): string | undefined { return this.get('Authorization'); }
   hasAuthorization(): boolean { return this.has('Authorization'); }
   setUserAgent(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('User-Agent', value, rewrite); }
-  getUserAgent(): unknown { return this.get('User-Agent'); }
+  getUserAgent(): string | undefined { return this.get('User-Agent'); }
   hasUserAgent(): boolean { return this.has('User-Agent'); }
+  setContentLength(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Content-Length', value, rewrite); }
+  getContentLength(): string | undefined { return this.get('Content-Length'); }
+  hasContentLength(): boolean { return this.has('Content-Length'); }
+  setContentEncoding(value: HeaderValue, rewrite?: HeaderRewrite): this { return this.set('Content-Encoding', value, rewrite); }
+  getContentEncoding(): string | undefined { return this.get('Content-Encoding'); }
+  hasContentEncoding(): boolean { return this.has('Content-Encoding'); }
 
   *[Symbol.iterator](): IterableIterator<[string, HeaderValue]> {
     for (const entry of this.values.values()) yield [entry.name, entry.value];

@@ -51,11 +51,17 @@ export class RateLimiter {
         if (index >= 0) this.queue.splice(index, 1);
         task.settled = true;
         if (task.timer) clearTimeout(task.timer);
+        merged.signal?.removeEventListener('abort', abort);
         reject(new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true }));
+        this.pump();
       };
       task.abort = abort;
       if (merged.signal?.aborted) return abort();
       merged.signal?.addEventListener('abort', abort, { once: true });
+      if (merged.signal?.aborted) {
+        abort();
+        return;
+      }
       this.queue.push(task as Task<unknown>);
       if (merged.queueTimeout && merged.queueTimeout > 0) {
         task.timer = setTimeout(() => {
@@ -65,6 +71,7 @@ export class RateLimiter {
           task.settled = true;
           merged.signal?.removeEventListener('abort', abort);
           reject(new HttpError('Rate limit queue timed out', { code: 'ERR_RATE_LIMIT_QUEUE_TIMEOUT' }));
+          this.pump();
         }, merged.queueTimeout);
       }
       this.pump();
@@ -114,6 +121,7 @@ export class RateLimiter {
           resolve();
         }, Math.max(1, Math.ceil((deficit / bytesPerSecond) * 1000)));
         merged.signal?.addEventListener('abort', onAbort, { once: true });
+        if (merged.signal?.aborted) onAbort();
       });
     }
   }
@@ -158,11 +166,15 @@ export class RateLimiter {
         state.active += 1;
         task.settled = true;
         if (task.timer) clearTimeout(task.timer);
-        Promise.resolve().then(task.run).then(task.resolve, task.reject).finally(() => {
+        const cleanup = () => {
           state.active -= 1;
           if (task.abort) task.options.signal?.removeEventListener('abort', task.abort);
           this.pump();
-        });
+        };
+        void Promise.resolve()
+          .then(task.run)
+          .then(task.resolve, task.reject)
+          .then(cleanup, cleanup);
       }
     } finally {
       this.pumping = false;

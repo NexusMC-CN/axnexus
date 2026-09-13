@@ -36,6 +36,28 @@ test('cancels queued tasks without starting them', async () => {
   await first;
 });
 
+test('removes queued abort listeners when a task is canceled', async () => {
+  const limiter = new RateLimiter({ maxConcurrent: 1 });
+  const first = limiter.run(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  const listeners = new Set<() => void>();
+  const signal = {
+    aborted: false,
+    addEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => {
+      listeners.add(listener as () => void);
+    },
+    removeEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => {
+      listeners.delete(listener as () => void);
+    },
+  } as unknown as AbortSignal;
+  const queued = limiter.run(() => Promise.resolve(), { signal });
+  assert.equal(listeners.size, 1);
+  const [abort] = [...listeners];
+  abort();
+  await assert.rejects(queued, (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED');
+  assert.equal(listeners.size, 0);
+  await first;
+});
+
 test('consumes bytes through a token bucket', async () => {
   const limiter = new RateLimiter({ bytesPerSecond: 1000 });
   const started = Date.now();

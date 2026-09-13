@@ -5,7 +5,7 @@
 ## 特性
 
 - 零运行时依赖，支持现代浏览器和 Node.js 18+。
-- 提供 `get`、`post`、`put`、`patch`、`delete` 和通用 `request` 方法。
+- 提供 `get`、`head`、`options`、`trace`、`connect`、`post`、`put`、`patch`、`delete` 和通用 `request` 方法。
 - 自动处理 JSON、文本、`Blob`、`ArrayBuffer`、`FormData` 和 `Response`。
 - 支持请求/响应拦截器、请求 ID、超时、`AbortSignal` 和可配置重试。
 - 支持结构化重试策略、`Retry-After`、退避抖动、总超时、状态校验和 JSON 转换钩子。
@@ -59,6 +59,8 @@ headers.set('X-Trace-Id', 'trace-1');
 console.log(headers.get('authorization'));
 ```
 
+`AxiosHeaders.from(value)` 会复用已有的 `AxiosHeaders`，或把原生 `Headers`、`Map`/其他可迭代键值对、普通对象转换成统一实例；需要交给 Fetch/XHR 时调用 `headers.toHeaders()`。`false` 是显式禁用该 header 的哨兵值（例如 `Content-Type: false`），`null`/`undefined` 则表示不发送。这样可以明确区分业务层的可变 headers 和 adapter 使用的原生 `Headers`。
+
 请求配置的 `headers` 可以包含 `common` 和按 method 分组的默认值；合并顺序是客户端默认值、`common`、当前 method、请求级值，后者优先且不会产生大小写重复键。
 
 ## 请求配置
@@ -79,6 +81,8 @@ const result = await http.get('/items', {
 
 `params` 使用 `URLSearchParams` 编码，数组会生成重复的 query key，`null` 和 `undefined` 会被跳过。相对路径会与 `baseURL` 合并；如果不允许绝对 URL，可以设置 `allowAbsoluteURL: false`。
 
+客户端缓存使用 `cache: { ttl }` 或 `cache: false`；如果需要把原生 Fetch 的缓存模式传给 adapter，请使用 `fetchCache`（或等价的 `requestCache`），例如 `fetchCache: 'no-store'`。Node Fetch 的 `dispatcher`/`agent`、标准 `priority`、`window` 和 `duplex` 也会按运行环境透传。
+
 普通对象、数组、数字、布尔值和 `null` 会自动 JSON 序列化。字符串、`FormData`、`Blob`、`ArrayBuffer`、`URLSearchParams` 和其他 `BodyInit` 会原样传递。
 
 ### 状态、超时和转换
@@ -93,7 +97,7 @@ const result = await http.get('/jobs/123', {
 });
 ```
 
-`timeout` 限制单次 adapter 尝试（也覆盖该次响应体读取），`totalTimeout` 从进入限速队列前开始计时，覆盖排队、响应体读取、重试等待和所有尝试。外部 `AbortSignal` 在总超时触发前取消时返回 `ERR_CANCELED`；总超时计时器已经触发时统一返回 `ETIMEDOUT`。带 `signal`、`timeout` 或 `totalTimeout` 的请求不会进入客户端 data cache，因此每个调用方的取消和截止时间都独立生效。
+`timeout` 限制单次 adapter 尝试（也覆盖该次响应体读取），`totalTimeout` 从进入限速队列前开始计时，覆盖排队、响应体读取、重试等待和所有尝试。单次 `timeout` 与外部取消同时发生时，以先触发者为准；外部 `AbortSignal` 在总超时触发前取消时返回 `ERR_CANCELED`，总超时计时器已经触发时统一返回 `ETIMEDOUT`。带 `signal`、`timeout` 或 `totalTimeout` 的请求不会进入客户端 data cache，因此每个调用方的取消和截止时间都独立生效。
 
 响应处理规则是固定的：`204`、`Content-Length: 0`、空字节以及只有空白字符的文本都返回 `null`；`responseType: 'text'` 保留非空文本原样，`blob` 和 `arrayBuffer` 返回对应二进制值。JSON（包括自定义 `parseJson`）解析失败会抛出 `ERR_BAD_PAYLOAD`，`transformResponse` 失败会抛出 `ERR_TRANSFORM_RESPONSE`，不会伪装成网络错误。错误状态的 payload 使用文本读取后尝试 JSON 解析，超过 `maxBodySize` 时 payload 置为 `null`，HTTP 错误本身仍保留状态码。
 
@@ -139,7 +143,7 @@ await http.get('/large-file', {
 });
 ```
 
-`RateLimiter` 也可以单独使用。限速等待可被 `AbortSignal` 取消；队列超时会抛出 `ERR_RATE_LIMIT_QUEUE_TIMEOUT`。默认 Fetch adapter 不伪造上传进度，因为标准 Fetch 没有跨环境一致的请求体进度事件。
+`RateLimiter` 也可以单独使用。限速等待可被 `AbortSignal` 取消；队列超时会抛出 `ERR_RATE_LIMIT_QUEUE_TIMEOUT`。默认 Fetch adapter 不伪造上传进度，因为标准 Fetch 没有跨环境一致的请求体进度事件；XHR 的原生进度事件可用于上传/下载进度，但浏览器 XHR 不提供可靠的字节级发送节流，因此 `bytesPerSecond` 只在 Fetch、Node HTTP/2 和由 transport 实现的 HTTP/3 路径上作用于传输过程。
 
 ## 完整响应
 
@@ -150,18 +154,18 @@ const response = await http.getResponse<{ id: string }>('/users/me');
 console.log(response.data, response.status, response.protocol, response.timings.duration);
 ```
 
-可用方法为 `requestResponse`、`getResponse`、`postResponse`、`putResponse`、`patchResponse` 和 `deleteResponse`。完整响应不会进入 GET data cache；`responseType: 'response'` 在普通方法中仍返回原始 `Response`。
+可用方法为 `requestResponse`、`getResponse`、`headResponse`、`optionsResponse`、`traceResponse`、`connectResponse`、`postResponse`、`putResponse`、`patchResponse` 和 `deleteResponse`。完整响应不会进入 GET data cache；`responseType: 'response'` 在普通方法中仍返回原始 `Response`。
 
 ### API 签名速查
 
 | API | 签名 |
 | --- | --- |
 | 创建实例 | `createHttpClient(config?: HttpClientConfig): HttpClient` |
-| 通用请求 | `request<T>(config: RequestConfig): Promise<T>` |
+| 通用请求 | `request<T>(config)` 或 `request<T>(url, config?): Promise<T>` |
 | 完整响应 | `requestResponse<T>(config: RequestConfig): Promise<HttpResponse<T>>` |
-| 便捷方法 | `get<T>(url, config?)`、`delete<T>(url, config?)` |
+| 便捷方法 | `get/head/options/trace/connect<T>(url, config?)`、`delete<T>(url, config?)` |
 | 带请求体方法 | `post<T, B>(url, data?, config?)`、`put<T, B>(...)`、`patch<T, B>(...)` |
-| 完整响应便捷方法 | `getResponse`、`postResponse`、`putResponse`、`patchResponse`、`deleteResponse` |
+| 完整响应便捷方法 | `getResponse`、`headResponse`、`optionsResponse`、`traceResponse`、`connectResponse`、`postResponse`、`putResponse`、`patchResponse`、`deleteResponse` |
 
 完整字段类型以包导出的 `RequestConfig`、`HttpClientConfig`、`HttpResponse` 和 `HttpError` 为准；`dist/*.d.ts` 会随构建产物发布。
 
@@ -223,7 +227,7 @@ const created = await http.post('/jobs', payload, {
 });
 ```
 
-网络错误和单次超时会遵循同一套重试次数配置，取消不会重试。请求级 `retry` 对象会继承客户端级对象，只有显式提供的字段会覆盖默认值；请求级数字只覆盖 `limit`，不会丢弃客户端的状态码、方法和退避设置。退避优先级为请求级 `retryDelay`、客户端级 `retryDelay`、`retry.delay`，数字延迟按第几个重试尝试线性累加，函数参数 `attempt` 从 `1` 开始。`validateStatus` 优先于 `throwHttpErrors`；被 `validateStatus` 接受或被 `throwHttpErrors: false` 接受的状态不会生成 `ERR_BAD_RESPONSE`，也不会触发状态重试。
+网络错误和单次超时会遵循同一套重试次数配置，取消不会重试。请求级 `retry` 对象会继承客户端级对象，只有显式提供的字段会覆盖默认值；请求级数字只覆盖 `limit`，不会丢弃客户端的状态码、方法和退避设置。退避优先级为请求级 `retryDelay`、客户端级 `retryDelay`、`retry.delay`，数字延迟按第几个重试尝试线性累加，函数参数 `attempt` 从 `1` 开始；`shouldRetry` 和 `beforeRetry` 收到的 `RetryContext.delay` 是应用 `Retry-After`、`maxDelay` 和抖动后的最终值。`validateStatus` 优先于 `throwHttpErrors`；被 `validateStatus` 接受或被 `throwHttpErrors: false` 接受的状态不会生成 `ERR_BAD_RESPONSE`，也不会触发状态重试。
 
 重试期间会复用同一个 `X-Request-Id`。`totalTimeout` 到期后不会进入下一次重试，即使还剩重试次数也会直接返回 `ETIMEDOUT`。
 
@@ -244,15 +248,16 @@ const response = await http.getResponse('/upstream', {
 });
 ```
 
-默认仍只对幂等方法按状态码重试；`methods` 可以显式放开方法范围，`shouldRetry` 可以完全接管判断。
+默认仍只对幂等方法按状态码重试；`methods` 可以显式放开方法范围，`shouldRetry` 可以接管应用错误的判断，但外部取消和不可重放的 `ReadableStream` 请求体始终不会重试。
 
 ## 拦截器
 
 ```typescript
+import { AxiosHeaders } from 'axnexus';
+
 http.interceptors.request.use((config) => {
-  // 客户端传给拦截器的 headers 运行时已经是 Headers；类型上显式转换可兼容 RequestConfig 联合类型
-  const headers = new Headers(config.headers as HeadersInit);
-  headers.set('Authorization', 'Bearer token');
+  const headers = AxiosHeaders.from(config.headers);
+  headers.setAuthorization('Bearer token');
   return { ...config, headers };
 });
 
@@ -262,9 +267,15 @@ http.interceptors.response.use((response) => {
     data: response.data,
   };
 });
+
+http.interceptors.response.use(undefined, (error) => {
+  // 可在这里记录或恢复错误；继续抛出则保留重试策略。
+  console.warn(error);
+  throw error;
+});
 ```
 
-请求拦截器按注册顺序执行，响应拦截器按注册逆序执行。`use` 返回数字 ID，可以传给对应管理器的 `eject` 移除。拦截器只属于当前客户端实例，不会修改全局状态。
+请求拦截器按注册顺序执行，响应拦截器按注册逆序执行。请求拦截器回调收到的是可直接调用 `.set()`、`.delete()` 的 `AxiosHeaders`；它是本次请求的最终头集合，因此删除客户端默认头不会在后续合并时恢复。`use` 返回数字 ID，可以传给对应管理器的 `eject` 移除。拦截器只属于当前客户端实例，不会修改全局状态。
 
 ## GET 缓存
 
@@ -281,7 +292,7 @@ await cachedHttp.get('/catalog', { bypassCache: true });
 cachedHttp.clearCache();
 ```
 
-缓存只作用于 GET。请求 key 包含 method、最终 URL、规范化请求头（自动生成的 `X-Request-Id` 除外）、`responseType` 以及 `credentials`、`mode`、`redirect`、`referrer`、`referrerPolicy`、`integrity` 和 `keepalive` 等 Fetch 行为选项；因此不同响应类型不会互相污染。相同 key 的进行中请求会共享一次 adapter 调用，但带 `signal`、`timeout`、`totalTimeout`、`maxBodySize`、`onDownloadProgress`、`rateLimit`、自定义 `parseJson`、`transformResponse`、`validateStatus` 或 `throwHttpErrors` 的请求会主动跳过客户端 data cache，以保证调用方的截止时间、响应边界、进度事件和状态策略不被共享请求吞掉。成功的非 GET 请求会清空当前实例缓存。缓存保存在内存中，不跨实例或持久化。
+缓存只作用于 GET。请求 key 包含 method、最终 URL、规范化请求头（自动生成的 `X-Request-Id` 除外）、`responseType` 以及 `credentials`、`mode`、`redirect`、`referrer`、`referrerPolicy`、`integrity` 和 `keepalive` 等 Fetch 行为选项；因此不同响应类型不会互相污染。相同 key 的进行中请求会共享一次 adapter 调用，但带 `signal`、`timeout`、`totalTimeout`、`maxBodySize`、`onDownloadProgress`、`rateLimit`、自定义 `parseJson`、`transformResponse`、`validateStatus` 或 `throwHttpErrors` 的请求会主动跳过客户端 data cache，以保证调用方的截止时间、响应边界、进度事件和状态策略不被共享请求吞掉；注册了请求或响应拦截器的实例也会跳过该缓存，因为拦截器可能在重试时改变 URL、请求头或请求体。成功的非 GET 请求会清空当前实例缓存。缓存保存在内存中，不跨实例或持久化。
 
 需要 stale-while-revalidate 或 stale-if-error 时直接使用 `ResponseCache`：
 
@@ -370,7 +381,10 @@ HTTP/2 只在 Node 环境通过独立入口启用，adapter 会按 origin 复用
 import { createHttpClient } from 'axnexus';
 import { nodeHttp2Adapter } from 'axnexus/node-http2';
 
-const nodeHttp = createHttpClient({ adapter: nodeHttp2Adapter });
+const nodeHttp = createHttpClient({
+  baseURL: 'https://api.example.com',
+  adapter: nodeHttp2Adapter,
+});
 const response = await nodeHttp.getResponse('/health');
 console.log(response.protocol); // h2
 ```
@@ -383,7 +397,7 @@ import { createHttp3Adapter } from 'axnexus/node-http3';
 const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) });
 ```
 
-没有注入 transport 时会抛出 `ERR_UNSUPPORTED_ADAPTER`。默认入口不会加载 Node 内置模块，也不会把 HTTP/1.1 Fetch 请求误标为 HTTP/2 或 HTTP/3。
+没有注入 transport 时会抛出 `ERR_UNSUPPORTED_ADAPTER`。默认入口不会加载 Node 内置模块，也不会把 HTTP/1.1 Fetch 请求误标为 HTTP/2 或 HTTP/3。Node HTTP/2 的 `ReadableStream` 请求体会在读取期间响应取消；不可重放的流请求不会自动重试。
 
 ## 运行环境差异
 
@@ -391,7 +405,7 @@ const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) })
 | --- | --- | --- | --- | --- | --- |
 | JSON、文本、Blob、ArrayBuffer | 支持 | 支持 | 支持 | 支持 | 由 transport 决定 |
 | AbortSignal 和超时 | 支持 | 支持 | 支持 | 支持 | 由 transport 决定 |
-| 下载进度 | response body 可读时支持 | 支持 | response body 可读时支持 | 由 adapter 实现 | 由 transport 决定 |
+| 下载进度 | response body 可读时支持 | 支持 | response body 可读时支持 | 支持 | 由 transport 决定 |
 | 上传进度 | 标准 Fetch 不保证 | 支持 `xhr.upload` | 标准 Fetch 不保证 | 由 adapter 实现 | 由 transport 决定 |
 | HTTP/2 | 浏览器自行协商，客户端不强制 | 浏览器自行协商 | 默认 Fetch 不强制 | `axnexus/node-http2` | 不适用 |
 | HTTP/3 | 浏览器自行协商 | 浏览器自行协商 | 默认不启用 | 不适用 | `axnexus/node-http3` + QUIC transport |

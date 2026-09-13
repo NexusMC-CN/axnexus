@@ -1,3 +1,5 @@
+import type { AxiosHeaders } from '../headers/headers.js';
+
 export function isPlainBody(value: unknown): boolean {
   if (typeof value === 'string') return false;
   if (value === null || typeof value !== 'object') return true;
@@ -13,11 +15,12 @@ export function isPlainBody(value: unknown): boolean {
 export function encodeBody(
   data: unknown,
   body: BodyInit | null | undefined,
-  headers: Headers,
+  headers: Headers | Pick<AxiosHeaders, 'has' | 'set'>,
   stringifyJson: (value: unknown) => string = JSON.stringify,
+  options: { contentTypeDisabled?: boolean } = {},
 ): BodyInit | null | undefined {
   if (data === undefined) return body;
   if (!isPlainBody(data)) return data as BodyInit;
-  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  if (!headers.has('Content-Type') && !options.contentTypeDisabled) headers.set('Content-Type', 'application/json');
   return stringifyJson(data);
 }

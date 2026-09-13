@@ -36,7 +36,10 @@ export class ResponseCache<T = unknown> {
 
   constructor(options: ResponseCacheOptions = {}) {
     this.now = options.now ?? Date.now;
-    this.maxEntries = Math.max(1, Math.floor(options.maxEntries ?? 256));
+    const requestedMaxEntries = Number(options.maxEntries ?? 256);
+    this.maxEntries = Number.isFinite(requestedMaxEntries)
+      ? Math.max(1, Math.floor(requestedMaxEntries))
+      : 256;
   }
 
   async getOrLoad(
@@ -55,7 +58,7 @@ export class ResponseCache<T = unknown> {
 
     const existing = this.inflight.get(key);
     if (cached && cached.staleUntil > now) {
-      if (!existing) void this.refresh(key, loader, ttl, staleWindow, policy.staleIfError);
+      if (!existing) void this.refresh(key, loader, ttl, staleWindow, policy.staleIfError).catch(() => undefined);
       return clone(cached.value);
     }
     if (existing) return clone(await existing);

@@ -10,7 +10,10 @@ export function serializeParams(params: QueryParams | undefined): string {
   for (const [key, value] of Object.entries(params)) {
     if (value === null || value === undefined) continue;
     const values = Array.isArray(value) ? value : [value];
-    for (const item of values) search.append(key, stringifyValue(item));
+    for (const item of values) {
+      if (item === null || item === undefined) continue;
+      search.append(key, stringifyValue(item));
+    }
   }
   return search.toString();
 }
@@ -35,5 +38,11 @@ export function resolveURL(baseURL = '', path = '', allowAbsoluteURL = true): st
 export function appendQuery(url: string, params?: QueryParams): string {
   const query = serializeParams(params);
   if (!query) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}${query}`;
+  const hashIndex = url.indexOf('#');
+  const base = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+  const hash = hashIndex >= 0 ? url.slice(hashIndex) : '';
+  const separator = base.includes('?')
+    ? (base.endsWith('?') || base.endsWith('&') ? '' : '&')
+    : '?';
+  return `${base}${separator}${query}${hash}`;
 }

@@ -45,6 +45,7 @@ export class ProgressTracker {
   }
 
   update(loaded: number, timestamp = (this.options.now ?? Date.now)()): TransferProgress | undefined {
+    if (this.options.signal?.aborted) return undefined;
     const safeLoaded = Math.max(this.lastLoaded, Number(loaded) || 0);
     if (safeLoaded === this.lastLoaded && this.lastReportedAt !== -Infinity) return undefined;
     this.lastLoaded = safeLoaded;
@@ -61,6 +62,7 @@ export class ProgressTracker {
   private lastLoadedBeforeReport = 0;
 
   complete(timestamp = (this.options.now ?? Date.now)()): TransferProgress | undefined {
+    if (this.options.signal?.aborted) return undefined;
     const total = Number.isFinite(this.options.total) ? Math.max(0, this.options.total as number) : undefined;
     return this.update(total === undefined ? this.lastLoaded : total, timestamp);
   }
@@ -85,35 +87,90 @@ export class ProgressTracker {
   }
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+}
+
+function readChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (!signal) return reader.read();
+  const reason = () => abortReason(signal);
+  if (signal.aborted) {
+    try { void reader.cancel(reason()).catch(() => undefined); } catch { /* stream already closed */ }
+    return Promise.reject(reason());
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { void reader.cancel(reason()).catch(() => undefined); } catch { /* stream already closed */ }
+      reject(reason());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    reader.read().then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 export function trackReadableStream(
   stream: ReadableStream<Uint8Array>,
   options: ProgressTrackerOptions,
 ): ReadableStream<Uint8Array> {
-  const tracker = new ProgressTracker(options);
+  const signal = options.signal ?? options.rateLimit?.signal;
+  const tracker = new ProgressTracker({ ...options, signal });
   const reader = stream.getReader();
+  let closed = false;
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (closed) return;
       try {
-        const result = await reader.read();
+        const result = await readChunk(reader, signal);
         if (result.done) {
+          closed = true;
           tracker.complete();
           controller.close();
         } else {
           if (options.rateLimiter) {
             await options.rateLimiter.consume(result.value.byteLength, {
               ...options.rateLimit,
-              signal: options.signal ?? options.rateLimit?.signal,
+              signal,
             });
           }
+          if (signal?.aborted) throw abortReason(signal);
           tracker.update(tracker.loaded + result.value.byteLength);
           controller.enqueue(result.value);
         }
       } catch (error) {
-        try { await reader.cancel(error); } catch { /* stream already closed */ }
+        closed = true;
+        // Cancellation is best-effort; a user-provided source may leave its
+        // cancel promise pending. The consumer must still observe the error.
+        try { void reader.cancel(error).catch(() => undefined); } catch { /* stream already closed */ }
         controller.error(error);
       }
     },
     cancel(reason) {
+      closed = true;
       return reader.cancel(reason);
     },
   });

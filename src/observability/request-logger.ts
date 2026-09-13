@@ -1,7 +1,10 @@
+import { isHttpError } from '../core/errors.js';
+import { AxiosHeaders, type HeaderInput } from '../headers/headers.js';
+
 export interface RequestStartRecord {
   method: string;
   url: string;
-  headers?: HeadersInit;
+  headers?: HeaderInput;
 }
 
 export interface RequestLogRecord {
@@ -37,12 +40,37 @@ export interface RequestLogger {
   error(input: Omit<RequestLogRecord, 'phase'>): void;
 }
 
-function normalizeHeaders(headers: HeadersInit | undefined, redact: Set<string>): Record<string, string> {
+function normalizeHeaders(headers: HeaderInput | undefined, redact: Set<string>): Record<string, string> {
   const output: Record<string, string> = {};
-  new Headers(headers).forEach((value, name) => {
+  AxiosHeaders.from(headers).forEach((value, name) => {
     output[name] = redact.has(name) ? '[REDACTED]' : value;
   });
   return output;
+}
+
+function sanitizeError(error: unknown, redact: Set<string>): unknown {
+  if (!isHttpError(error)) return error;
+  return {
+    name: error.name,
+    message: error.message,
+    code: error.code,
+    ...(error.status === undefined ? {} : { status: error.status }),
+    isAbort: error.isAbort,
+    isTimeout: error.isTimeout,
+    retryable: error.retryable,
+    ...(error.config ? {
+      config: {
+        method: error.config.method,
+        url: error.config.url,
+        headers: normalizeHeaders(error.config.headers, redact),
+      },
+    } : {}),
+  };
+}
+
+function sanitizeRecordError<T extends { error?: unknown }>(record: T, redact: Set<string>): T {
+  if (record.error === undefined) return record;
+  return { ...record, error: sanitizeError(record.error, redact) };
 }
 
 export function createRequestLogger(
@@ -62,7 +90,7 @@ export function createRequestLogger(
     input: Omit<RequestLogRecord, 'phase'>,
   ): void => {
     emit({
-      ...input,
+      ...sanitizeRecordError(input, redact),
       ...(input.headers ? { headers: normalizeHeaders(input.headers, redact) } : {}),
       phase,
     });
@@ -82,7 +110,7 @@ export function createRequestLogger(
         finished = true;
         const duration = record.duration ?? Math.max(0, readNow() - startedAt);
         emit({
-          ...record,
+          ...sanitizeRecordError(record, redact),
           phase,
           method,
           url: input.url,

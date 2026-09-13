@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequestLogger } from '../dist/observability/request-logger.js';
+import { AxiosHeaders, HttpError } from '../dist/index.js';
 
 test('request logger emits lifecycle records with redacted headers', () => {
   const records: unknown[] = [];
@@ -120,4 +121,42 @@ test('logger compatibility records redact sensitive headers', () => {
       },
     },
   ]);
+});
+
+test('logger sanitizes nested HttpError configuration before emitting', () => {
+  const records: Array<{ error?: unknown }> = [];
+  const logger = createRequestLogger((record) => records.push(record));
+  const error = new HttpError('forbidden', {
+    code: 'ERR_BAD_RESPONSE',
+    status: 403,
+    config: {
+      method: 'GET',
+      url: 'https://api.example.test/private',
+      headers: new Headers({ Authorization: 'Bearer nested-secret', Cookie: 'sid=nested-secret' }),
+      body: undefined,
+    },
+  });
+
+  logger.error({ method: 'GET', url: error.config?.url, error });
+
+  const emitted = records[0]?.error as { config?: { headers?: Record<string, string> }; message?: string };
+  assert.equal(emitted?.message, 'forbidden');
+  assert.deepEqual(emitted?.config?.headers, {
+    authorization: '[REDACTED]',
+    cookie: '[REDACTED]',
+  });
+  assert.equal(JSON.stringify(records).includes('nested-secret'), false);
+});
+
+test('logger accepts AxiosHeaders and omits disabled header sentinels', () => {
+  const records: unknown[] = [];
+  const logger = createRequestLogger((record) => records.push(record));
+  const headers = new AxiosHeaders({ Authorization: 'Bearer secret', Accept: false });
+  logger.start({ method: 'GET', url: '/headers', headers }).complete();
+  assert.deepEqual(records[0], {
+    phase: 'start',
+    method: 'GET',
+    url: '/headers',
+    headers: { authorization: '[REDACTED]' },
+  });
 });

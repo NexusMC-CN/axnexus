@@ -72,6 +72,12 @@ function normalizeRetryCount(value: number | undefined): number {
   return Math.max(0, Math.floor(value));
 }
 
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized <= 0) return fallback;
+  return Math.max(1, Math.floor(normalized));
+}
+
 async function resolveRetryDelay(
   retryDelay: ChunkRetryDelay | undefined,
   attempt: number,
@@ -86,8 +92,8 @@ async function resolveRetryDelay(
 }
 
 export async function uploadChunks<T>(source: Uint8Array, options: ChunkUploadOptions<T>): Promise<T[]> {
-  const chunkSize = Math.max(1, Math.floor(options.chunkSize));
-  const concurrency = Math.max(1, Math.floor(options.concurrency ?? 1));
+  const chunkSize = normalizePositiveInteger(options.chunkSize, 1);
+  const concurrency = normalizePositiveInteger(options.concurrency, 1);
   const maxRetries = normalizeRetryCount(options.retry);
   const total = source.byteLength;
   const count = Math.ceil(total / chunkSize);

@@ -112,3 +112,107 @@ test('xhr adapter treats status zero as a network error', async () => {
     globalThis.XMLHttpRequest = original;
   }
 });
+
+test('xhr adapter classifies a core timeout abort as ETIMEDOUT', async () => {
+  class HangingXHR {
+    upload = {};
+    onreadystatechange: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    ontimeout: (() => void) | null = null;
+    readyState = 0;
+    status = 200;
+    statusText = 'OK';
+    responseType = '';
+    response = '';
+    open() { this.readyState = 1; }
+    setRequestHeader() {}
+    getAllResponseHeaders() { return ''; }
+    send() {}
+    abort() { this.onabort?.(); }
+  }
+  const original = globalThis.XMLHttpRequest;
+  const controller = new AbortController();
+  globalThis.XMLHttpRequest = HangingXHR as never;
+  try {
+    const pending = createXhrAdapter()({
+      url: 'https://example.test', method: 'GET', headers: new Headers(), signal: controller.signal,
+    } as never);
+    controller.abort({ code: 'ETIMEDOUT', name: 'TimeoutError' });
+    await assert.rejects(pending, (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ETIMEDOUT');
+  } finally {
+    globalThis.XMLHttpRequest = original;
+  }
+});
+
+test('xhr adapter keeps external cancellation as ERR_CANCELED', async () => {
+  class HangingXHR {
+    upload = {};
+    onreadystatechange: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    ontimeout: (() => void) | null = null;
+    readyState = 0;
+    status = 200;
+    statusText = 'OK';
+    responseType = '';
+    response = '';
+    open() { this.readyState = 1; }
+    setRequestHeader() {}
+    getAllResponseHeaders() { return ''; }
+    send() {}
+    abort() { this.onabort?.(); }
+  }
+  const original = globalThis.XMLHttpRequest;
+  const controller = new AbortController();
+  globalThis.XMLHttpRequest = HangingXHR as never;
+  try {
+    const pending = createXhrAdapter()({
+      url: 'https://example.test', method: 'GET', headers: new Headers(), signal: controller.signal,
+    } as never);
+    controller.abort();
+    await assert.rejects(pending, (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ERR_CANCELED');
+  } finally {
+    globalThis.XMLHttpRequest = original;
+  }
+});
+
+test('xhr adapter rejects immediately when the signal is already aborted', async () => {
+  let opened = false;
+  class NeverXHR {
+    upload = {};
+    onreadystatechange: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    ontimeout: (() => void) | null = null;
+    readyState = 0;
+    status = 200;
+    statusText = 'OK';
+    responseType = '';
+    response = '';
+    open() { opened = true; this.readyState = 1; }
+    setRequestHeader() {}
+    getAllResponseHeaders() { return ''; }
+    send() {}
+    abort() { this.onabort?.(); }
+  }
+  const original = globalThis.XMLHttpRequest;
+  const controller = new AbortController();
+  controller.abort();
+  globalThis.XMLHttpRequest = NeverXHR as never;
+  try {
+    await assert.rejects(
+      Promise.race([
+        createXhrAdapter()({ url: 'https://example.test', method: 'GET', headers: new Headers(), signal: controller.signal } as never),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('request hung')), 100)),
+      ]),
+      (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ERR_CANCELED',
+    );
+    assert.equal(opened, false);
+  } finally {
+    globalThis.XMLHttpRequest = original;
+  }
+});

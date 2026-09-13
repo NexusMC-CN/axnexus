@@ -2,7 +2,6 @@ import type { RequestConfig } from '../core/types.js';
 
 export interface CsrfInterceptorOptions {
   readToken: () => string | null | undefined;
-  cookieName?: string;
   headerName?: string;
   methods?: readonly string[];
 }

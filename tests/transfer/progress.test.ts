@@ -60,3 +60,58 @@ test('cancels byte throttling when the tracked stream signal aborts', async () =
     (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ERR_CANCELED',
   );
 });
+
+test('progress tracker does not emit after its signal aborts', () => {
+  const controller = new AbortController();
+  const events: number[] = [];
+  const tracker = new ProgressTracker({
+    phase: 'download', total: 10, signal: controller.signal,
+    onProgress: (event) => events.push(event.loaded),
+  });
+  controller.abort();
+  assert.equal(tracker.update(5), undefined);
+  assert.equal(tracker.complete(), undefined);
+  assert.deepEqual(events, []);
+});
+
+test('tracked stream cancels a pending reader when its signal aborts', async () => {
+  const controller = new AbortController();
+  let canceled = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull() {
+      return new Promise<void>(() => {});
+    },
+    cancel() {
+      canceled = true;
+      return new Promise<void>(() => {});
+    },
+  });
+  const tracked = trackReadableStream(source, { phase: 'download', signal: controller.signal });
+  const pending = tracked.getReader().read();
+  controller.abort();
+  await assert.rejects(
+    Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(new Error('stream hung')), 100))]),
+    (error: unknown) => error instanceof DOMException && error.name === 'AbortError',
+  );
+  assert.equal(canceled, true);
+});
+
+test('tracked stream observes a signal supplied through rateLimit options', async () => {
+  const controller = new AbortController();
+  const source = new ReadableStream<Uint8Array>({
+    pull() {
+      return new Promise<void>(() => {});
+    },
+  });
+  const tracked = trackReadableStream(source, {
+    phase: 'download',
+    rateLimiter: new RateLimiter({ bytesPerSecond: 1 }),
+    rateLimit: { bytesPerSecond: 1, signal: controller.signal },
+  });
+  const pending = tracked.getReader().read();
+  controller.abort();
+  await assert.rejects(
+    Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(new Error('stream hung')), 100))]),
+    (error: unknown) => error instanceof DOMException && error.name === 'AbortError',
+  );
+});
