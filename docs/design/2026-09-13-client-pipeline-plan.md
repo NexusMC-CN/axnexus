@@ -137,15 +137,15 @@
 
 **文件：** 不新增运行时代码；检查 `package.json`、`dist`、Git 状态。
 
-- [ ] **步骤 1：构建和完整测试**
+- [x] **步骤 1：构建和完整测试**
 
 运行 `npm test`，确认 TypeScript build 和全部 Node tests 均通过。
 
-- [ ] **步骤 2：打包检查**
+- [x] **步骤 2：打包检查**
 
 串行运行 `npm pack --dry-run --json`，确认只包含 `dist`、`README.md`、`LICENSE` 和 `package.json`，没有 tests、设计文档或 `superpowers`。
 
-- [ ] **步骤 3：入口 smoke**
+- [x] **步骤 3：入口 smoke**
 
 运行根入口、`./dist/adapters/node-http2.js` 和 `./dist/adapters/node-http3.js` 的 ESM import 检查，确认公开工厂和 adapter 导出存在。
 
