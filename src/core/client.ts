@@ -1,12 +1,10 @@
 import { GetRequestCache } from '../cache/get-cache.js';
-import { HttpError } from './errors.js';
-import { applyInterceptorChain, applyInterceptorErrorChain, createRequestInterceptorManager, createInterceptorManager } from './interceptors.js';
-import { readErrorPayload, readResponse } from '../utils/response.js';
+import { HttpError, toError } from './errors.js';
+import { applyInterceptorChain, createRequestInterceptorManager, createInterceptorManager } from './interceptors.js';
 import { AxiosHeaders } from '../headers/headers.js';
 import { RateLimiter } from '../transfer/rate-limiter.js';
-import { combineSignals, raceWithSignal, signalReason, sleep, TIMEOUT_REASON } from './control.js';
+import { combineSignals, raceWithSignal, sleep, TIMEOUT_REASON } from './control.js';
 import {
-  applyResponseTransforms,
   buildFetchAdapter,
   createRequestId,
   createResolvedConfig,
@@ -19,113 +17,17 @@ import {
   calculateRetryDelay,
   DEFAULT_RETRY_ON,
   shouldRetry,
-  statusShouldThrow,
 } from './retry.js';
 import { resolveCachePolicy } from './cache-policy.js';
+import { executeAttempt } from './attempt.js';
 import type {
-  AdapterResult,
   HttpClient,
   HttpClientConfig,
   HttpResponse,
   RequestConfig,
   RetryContext,
-  RetryOptions,
   ResolvedRequestConfig,
-  ResponseType,
 } from './types.js';
-
-function responseMessage(payload: unknown, status: number): string {
-  if (payload && typeof payload === 'object') {
-    const record = payload as Record<string, unknown>;
-    if (typeof record.message === 'string' && record.message.trim()) return record.message.trim();
-    if (typeof record.error === 'string' && record.error.trim()) return record.error.trim();
-  }
-  if (typeof payload === 'string' && payload.trim()) return payload.trim().slice(0, 240);
-  return `Request failed with HTTP ${status}`;
-}
-
-async function readResponsePayload(response: Response, maxBodySize?: number, signal?: AbortSignal): Promise<unknown> {
-  return readErrorPayload(response, maxBodySize, signal);
-}
-
-async function parseResponse(
-  response: Response,
-  type: ResponseType,
-  maxBodySize: number | undefined,
-  parseJson: RequestConfig['parseJson'],
-  signal?: AbortSignal,
-): Promise<unknown> {
-  return readResponse(response, type, maxBodySize, parseJson, signal);
-}
-
-function toError(
-  error: unknown,
-  config: ResolvedRequestConfig,
-  timeoutTriggered: boolean,
-  canceled: boolean,
-): HttpError {
-  // The controller that timed out/canceled the attempt is authoritative even
-  // when a custom adapter reports a generic HttpError of its own.
-  if (timeoutTriggered) {
-    return new HttpError('Request timed out', {
-      code: 'ETIMEDOUT',
-      config,
-      isTimeout: true,
-      retryable: true,
-      cause: error,
-    });
-  }
-  if (canceled) {
-    return new HttpError('Request canceled', {
-      code: 'ERR_CANCELED',
-      config,
-      isAbort: true,
-      cause: error,
-    });
-  }
-  if (error instanceof HttpError) {
-    if (!error.config) {
-      return new HttpError(error.message, {
-        code: error.code,
-        config,
-        status: error.status,
-        response: error.response,
-        isAbort: error.isAbort,
-        isTimeout: error.isTimeout,
-        retryable: error.retryable,
-        cause: error,
-      });
-    }
-    return error;
-  }
-  return new HttpError('Network request failed', {
-    code: 'ERR_NETWORK',
-    config,
-    retryable: true,
-    cause: error,
-  });
-}
-
-function responseInterceptorError(error: unknown, config: ResolvedRequestConfig): HttpError {
-  if (error instanceof HttpError) {
-    return new HttpError(error.message, {
-      code: error.code,
-      status: error.status,
-      config: error.config ?? config,
-      response: error.response,
-      isAbort: error.isAbort,
-      isTimeout: error.isTimeout,
-      retryable: false,
-      cause: error,
-    });
-  }
-  return new HttpError(error instanceof Error ? error.message : 'Response interceptor failed', {
-    code: 'ERR_NETWORK',
-    config,
-    retryable: false,
-    cause: error,
-  });
-}
 
 export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const defaults: HttpClientConfig = {
@@ -274,154 +176,29 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           if (stableRequestId) resolved.headers.set('X-Request-Id', stableRequestId);
         }
         const attemptResolved: ResolvedRequestConfig = resolved || initialResolved;
-        // Preserve initial cancellation and total timeout signals, while also
-        // honoring a signal that a request interceptor supplies on a retry.
-        const attemptSignals = combineSignals([
-          overallSignal.signal,
-          attemptResolved.signal,
-          attemptResolved.rateLimit?.signal,
-        ]);
-        const externalSignal = attemptSignals.signal;
-        const controller = externalSignal || timeoutMs > 0 || totalController ? new AbortController() : null;
-        let timeoutTriggered = false;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const onAbort = () => controller?.abort(externalSignal?.reason);
-        if (externalSignal && controller) externalSignal.addEventListener('abort', onAbort, { once: true });
-        if (timeoutMs > 0 && controller) {
-          timer = setTimeout(() => {
-            timeoutTriggered = true;
-            controller.abort(TIMEOUT_REASON);
-          }, timeoutMs);
-        }
-        const attemptConfig: ResolvedRequestConfig = {
-          ...attemptResolved,
-          signal: controller?.signal,
-        };
-        (attemptConfig as ResolvedRequestConfig & { rateLimiter?: RateLimiter }).rateLimiter = rateLimiter;
-        const startedAt = Date.now();
-        let responseInterceptorChainStarted = false;
         try {
-          // Abort listeners do not fire when attached to an already-aborted
-          // signal. Check explicitly before invoking an adapter so a signal
-          // swapped in by a retry interceptor cannot let the attempt start.
-          if (externalSignal?.aborted) {
-            const reason = signalReason(externalSignal);
-            controller?.abort(reason);
-            throw reason;
-          }
-          const adapterOutput = await raceWithSignal(adapter(attemptConfig), attemptConfig.signal);
-          const rawResponse = adapterOutput instanceof Response
-            ? adapterOutput
-            : (adapterOutput as AdapterResult).response;
-          const metadata = adapterOutput instanceof Response ? undefined : (adapterOutput as AdapterResult).metadata;
-          const headersAt = Date.now();
-          if (statusShouldThrow(attemptConfig, rawResponse.status)) {
-            const payload = await readResponsePayload(rawResponse, attemptResolved.maxBodySize, attemptConfig.signal);
-            const response: HttpResponse<unknown> = {
-              data: payload,
-              status: rawResponse.status,
-              statusText: rawResponse.statusText,
-              headers: new AxiosHeaders(rawResponse.headers),
-              config: attemptConfig,
-              raw: rawResponse,
-              protocol: metadata?.protocol ?? 'unknown',
-              timings: {
-                queuedAt,
-                startedAt,
-                headersAt,
-                completedAt: Date.now(),
-                duration: Date.now() - queuedAt,
-                ...metadata?.timings,
-              },
-            };
-            throw new HttpError(responseMessage(payload, rawResponse.status), {
-              code: 'ERR_BAD_RESPONSE',
-              status: rawResponse.status,
-              config: attemptConfig,
-              response,
-              retryable: retryOn.has(rawResponse.status),
-            });
-          }
-          const data = await parseResponse(
-            rawResponse,
-            attemptResolved.responseType ?? 'json',
-            attemptResolved.maxBodySize,
-            attemptResolved.parseJson,
-            attemptConfig.signal,
-          );
-          let transformedData: unknown;
-          try {
-            transformedData = await applyResponseTransforms(data, attemptResolved.transformResponse ?? defaults.transformResponse, rawResponse);
-          } catch (cause) {
-            throw new HttpError('Response transform failed', {
-              code: 'ERR_TRANSFORM_RESPONSE',
-              config: attemptConfig,
-              cause,
-            });
-          }
-          const response: HttpResponse<unknown> = {
-            data: transformedData,
-            status: rawResponse.status,
-            statusText: rawResponse.statusText,
-            headers: new AxiosHeaders(rawResponse.headers),
-            config: attemptConfig,
-            raw: rawResponse,
-            protocol: metadata?.protocol ?? 'unknown',
-            timings: {
-              queuedAt,
-              startedAt,
-              headersAt,
-              completedAt: Date.now(),
-              duration: Date.now() - queuedAt,
-              downloadDuration: Date.now() - headersAt,
-              ...metadata?.timings,
-            },
-          };
-          responseInterceptorChainStarted = true;
-          return await raceWithSignal(
-            applyInterceptorChain(responseInterceptors, response, { reverse: true }),
-            externalSignal,
-          );
+          return await executeAttempt({
+            adapter,
+            config: attemptResolved,
+            defaults,
+            responseInterceptors,
+            retryOn,
+            overallSignal: overallSignal.signal,
+            queuedAt,
+            timeoutMs,
+            totalTimeoutEnabled: Boolean(totalController),
+            totalTimeoutTriggered: () => totalTimeoutTriggered,
+            rateLimiter,
+          });
         } catch (error) {
-          if (responseInterceptorChainStarted) {
-            // `applyInterceptorChain` already traverses rejected handlers after
-            // a fulfilled handler fails. Running a second chain would duplicate
-            // side effects and make recovery order differ from Promise semantics.
-            if (attemptConfig.signal?.aborted) {
-              throw toError(
-                error,
-                attemptConfig,
-                timeoutTriggered || totalTimeoutTriggered,
-                Boolean(externalSignal?.aborted),
-              );
-            }
-            throw responseInterceptorError(error, attemptConfig);
-          }
-          const normalized = toError(
-            error,
-            attemptConfig,
-            timeoutTriggered || totalTimeoutTriggered,
-            Boolean(externalSignal?.aborted),
-          );
-          try {
-            const recovered = await raceWithSignal(
-              applyInterceptorErrorChain(responseInterceptors, normalized, { reverse: true }),
-              externalSignal,
-            );
-            if ((recovered as unknown) !== normalized) return recovered;
-          } catch (rejectedError) {
-            // If cancellation won the race while the rejected handlers were
-            // being dispatched, keep the normalized cancellation instead of
-            // reporting the signal's DOMException as an interceptor failure.
-            if (rejectedError !== normalized && !attemptConfig.signal?.aborted) {
-              throw responseInterceptorError(rejectedError, attemptConfig);
-            }
-          }
+          const normalized = error instanceof HttpError
+            ? error
+            : toError(error, attemptResolved, totalTimeoutTriggered, Boolean(overallSignal.signal?.aborted));
           lastError = normalized;
           if (totalTimeoutTriggered) {
             throw new HttpError('Request timed out', {
               code: 'ETIMEDOUT',
-              config: attemptConfig,
+              config: normalized.config ?? attemptResolved,
               isTimeout: true,
               retryable: false,
               cause: normalized,
@@ -431,18 +208,19 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
           const retryCount = attempt + 1;
           const delay = calculateRetryDelay(retry, retryDelay, retryCount, normalized);
           if (!(await raceWithSignal(
-            shouldRetry(normalized, attemptConfig, retry, retryOn, retryCount, delay),
-            externalSignal,
+            shouldRetry(normalized, normalized.config ?? attemptResolved, retry, retryOn, retryCount, delay),
+            normalized.config?.signal ?? overallSignal.signal,
           ))) throw normalized;
           const retryContext: RetryContext = { error: normalized, retryCount, delay };
-          if (retry.beforeRetry) await raceWithSignal(retry.beforeRetry(retryContext), externalSignal);
+          const retrySignal = normalized.config?.signal ?? overallSignal.signal;
+          if (retry.beforeRetry) await raceWithSignal(retry.beforeRetry(retryContext), retrySignal);
           try {
-            await sleep(delay, externalSignal);
+            await sleep(delay, retrySignal);
           } catch (sleepError) {
             if (totalTimeoutTriggered) {
               throw new HttpError('Request timed out', {
                 code: 'ETIMEDOUT',
-                config: attemptConfig,
+                config: normalized.config ?? attemptResolved,
                 isTimeout: true,
                 retryable: false,
                 cause: sleepError,
@@ -450,10 +228,6 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
             }
             throw sleepError;
           }
-        } finally {
-          if (timer) clearTimeout(timer);
-          if (externalSignal && controller) externalSignal.removeEventListener('abort', onAbort);
-          attemptSignals.cleanup();
         }
       }
       throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: initialResolved });

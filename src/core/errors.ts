@@ -48,3 +48,72 @@ export class HttpError<T = unknown> extends Error {
 export function isHttpError(value: unknown): value is HttpError {
   return value instanceof HttpError;
 }
+
+export function toError(
+  error: unknown,
+  config: ResolvedRequestConfig,
+  timeoutTriggered: boolean,
+  canceled: boolean,
+): HttpError {
+  // The controller that timed out/canceled the attempt is authoritative even
+  // when a custom adapter reports a generic HttpError of its own.
+  if (timeoutTriggered) {
+    return new HttpError('Request timed out', {
+      code: 'ETIMEDOUT',
+      config,
+      isTimeout: true,
+      retryable: true,
+      cause: error,
+    });
+  }
+  if (canceled) {
+    return new HttpError('Request canceled', {
+      code: 'ERR_CANCELED',
+      config,
+      isAbort: true,
+      cause: error,
+    });
+  }
+  if (error instanceof HttpError) {
+    if (!error.config) {
+      return new HttpError(error.message, {
+        code: error.code,
+        config,
+        status: error.status,
+        response: error.response,
+        isAbort: error.isAbort,
+        isTimeout: error.isTimeout,
+        retryable: error.retryable,
+        cause: error,
+      });
+    }
+    return error;
+  }
+  return new HttpError('Network request failed', {
+    code: 'ERR_NETWORK',
+    config,
+    retryable: true,
+    cause: error,
+  });
+}
+
+export function responseInterceptorError(error: unknown, config: ResolvedRequestConfig): HttpError {
+  if (error instanceof HttpError) {
+    return new HttpError(error.message, {
+      code: error.code,
+      status: error.status,
+      config: error.config ?? config,
+      response: error.response,
+      isAbort: error.isAbort,
+      isTimeout: error.isTimeout,
+      retryable: false,
+      cause: error,
+    });
+  }
+  return new HttpError(error instanceof Error ? error.message : 'Response interceptor failed', {
+    code: 'ERR_NETWORK',
+    config,
+    retryable: false,
+    cause: error,
+  });
+}
