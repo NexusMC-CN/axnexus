@@ -41,18 +41,19 @@ export async function shouldRetry(
   if (typeof retry.shouldRetry === 'function') {
     return retry.shouldRetry({ error, retryCount, delay });
   }
-  if (error.retryable === false) return false;
+  const errorCodes = new Set(retry.errorCodes ?? []);
+  const explicitlyAllowedErrorCode = errorCodes.has(error.code);
+  if (error.retryable === false && !explicitlyAllowedErrorCode) return false;
   const methods = new Set((retry.methods ?? []).map((method) => method.toUpperCase()));
   const methodAllowed = methods.size > 0
     ? methods.has(config.method)
     : IDEMPOTENT_METHODS.has(config.method) || Boolean(config.retryUnsafeMethods);
   if (!methodAllowed) return false;
-  const errorCodes = new Set(retry.errorCodes ?? []);
   const defaultDecision = error.isTimeout || error.code === 'ERR_NETWORK'
     ? true
     : error.code === 'ERR_BAD_RESPONSE' && error.status !== undefined
-      ? (retry.statusCodes ? retry.statusCodes.includes(error.status) : retryOn.has(error.status))
-      : errorCodes.has(error.code);
+      ? retryOn.has(error.status)
+      : explicitlyAllowedErrorCode;
   return defaultDecision;
 }
 
@@ -67,11 +68,13 @@ export function calculateRetryDelay(
     : Math.max(0, Number(retryDelay) || 0) * retryCount;
   const retryAfter = retry.respectRetryAfter === false ? undefined : retryAfterMs(error.response);
   if (retryAfter !== undefined) delay = retryAfter;
-  if (retry.maxDelay !== undefined) delay = Math.min(delay, Math.max(0, retry.maxDelay));
+  const maxDelay = retry.maxDelay === undefined ? undefined : Math.max(0, retry.maxDelay);
+  if (maxDelay !== undefined) delay = Math.min(delay, maxDelay);
   if (retry.jitter) {
     delay = typeof retry.jitter === 'function'
       ? Math.max(0, Number(retry.jitter(delay, retryCount, error)) || 0)
       : Math.random() * delay;
   }
+  if (maxDelay !== undefined) delay = Math.min(delay, maxDelay);
   return delay;
 }

@@ -48,6 +48,8 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 
 默认凭据策略是 `include`，默认自动添加 `Accept: application/json` 和 `X-Request-Id`。调用方显式传入同名请求头时会保留调用方的值。
 
+`include` 会让浏览器跨源请求主动携带凭据，服务端必须正确配置 CORS 和 `Access-Control-Allow-Credentials`；需要原生 Fetch 的 `same-origin` 行为时请显式传入 `credentials`。
+
 ## Headers
 
 ```typescript
@@ -214,6 +216,8 @@ try {
 
 ### `fetchJson` 的状态与解析
 
+运行时 schema 校验不绑定具体库；需要时可在 `transformResponse` 中接入 Zod、Valibot 或 Standard Schema。
+
 `fetchJson` 遵循 Fetch 的状态语义，不会因为非 2xx 自动抛错：非 2xx、`204`、`Content-Length: 0`、空字节或只有空白字符的响应都返回 `null`。需要同时取得状态码和原始 `Response` 时使用 `fetchJsonResult`；它会返回 `{ data, status, response }`。
 
 成功状态的非空响应会交给 `parseJson`（默认 `JSON.parse`）。解析器抛错会转换为 `HttpError`，错误码为 `ERR_BAD_PAYLOAD`；`fetchJson` 的超时或外部 signal 取消仍按原生 `AbortError` 传播，不会转换成客户端请求使用的 `ETIMEDOUT` 或 `ERR_CANCELED`。`timeout` 和兼容 AVMCBBS 的 `timeoutMs` 都可用，二者同时提供时以 `timeoutMs` 为准。
@@ -321,6 +325,8 @@ const created = await http.post('/jobs', payload, {
 
 网络错误和单次超时会遵循同一套重试次数配置，取消不会重试。请求级 `retry` 对象会继承客户端级对象，只有显式提供的字段会覆盖默认值；请求级数字只覆盖 `limit`，不会丢弃客户端的状态码、方法和退避设置。退避优先级为请求级 `retryDelay`、客户端级 `retryDelay`、`retry.delay`，数字延迟按第几个重试尝试线性累加，函数参数 `attempt` 从 `1` 开始；`shouldRetry` 和 `beforeRetry` 收到的 `RetryContext.delay` 是应用 `Retry-After`、`maxDelay` 和抖动后的最终值。`validateStatus` 优先于 `throwHttpErrors`；被 `validateStatus` 接受或被 `throwHttpErrors: false` 接受的状态不会生成 `ERR_BAD_RESPONSE`，也不会触发状态重试。
 
+状态码策略的优先级是请求级 `retryOn`、请求级 `retry.statusCodes`、客户端级 `retryOn`、客户端级 `retry.statusCodes`，最后才是内置默认值；建议同一层只使用一种写法。默认 `respectRetryAfter: true`：有效的 `Retry-After` 会覆盖本地退避，之后 `maxDelay` 仍是最终上限，抖动也不会突破它；设为 `false` 才会忽略服务端退避。`retry.errorCodes` 是非 HTTP 错误的显式白名单，会覆盖该错误默认的 `retryable: false`，但取消和不可重放的 `ReadableStream` 始终不会重试。
+
 重试期间会复用同一个 `X-Request-Id`。`totalTimeout` 到期后不会进入下一次重试，即使还剩重试次数也会直接返回 `ETIMEDOUT`。
 
 需要更细粒度控制时可以传入对象：
@@ -341,6 +347,8 @@ const response = await http.getResponse('/upstream', {
 ```
 
 默认仍只对幂等方法按状态码重试；`methods` 可以显式放开方法范围，`shouldRetry` 可以接管应用错误的判断，但外部取消和不可重放的 `ReadableStream` 请求体始终不会重试。
+
+不可重放流的限制优先于自定义 `shouldRetry`，即使回调返回 `true` 也不会强行重试一次性 `ReadableStream`。
 
 ## 拦截器
 
@@ -400,6 +408,8 @@ const data = await cache.getOrLoad('catalog', loadCatalog, {
 ```
 
 `fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求，会转发显式 `cookie`、处理空响应并允许注入 `fetch` 和 JSON parser；它的 `headers` 接受与主客户端相同的 `HeaderInput`（包括 `AxiosHeaders`），`maxBodySize` 默认不限制响应体；`timeout` 与 AVMCBBS 原实现的 `timeoutMs` 都可用：
+
+`fetchJson` 不创建客户端实例，因此不会继承 `createHttpClient` 的 `credentials: 'include'` 默认值；需要跨源凭据时请显式传入 `credentials: 'include'` 或 `cookie`。
 
 ```typescript
 import { fetchJson } from 'axnexus';

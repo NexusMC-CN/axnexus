@@ -45,6 +45,109 @@ test('supports structured retry policy and invokes beforeRetry', async () => {
   assert.deepEqual(retryAttempts, [1]);
 });
 
+test('request retry statusCodes override client retryOn consistently', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    retryOn: [500],
+    retry: { limit: 1 },
+    adapter: async () => {
+      attempts += 1;
+      return new Response('{}', { status: attempts === 1 ? 503 : 200 });
+    },
+  });
+
+  assert.deepEqual(
+    await client.get('/retry-status-precedence', {
+      retry: { statusCodes: [503], delay: 0 },
+    }),
+    {},
+  );
+  assert.equal(attempts, 2);
+});
+
+test('request retryOn overrides client retry statusCodes', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: { limit: 1, statusCodes: [503] },
+    adapter: async () => {
+      attempts += 1;
+      return new Response('{}', { status: attempts === 1 ? 500 : 200 });
+    },
+  });
+
+  assert.deepEqual(await client.get('/retry-status-legacy-precedence', {
+    retryOn: [500],
+    retry: { delay: 0 },
+  }), {});
+  assert.equal(attempts, 2);
+});
+
+test('retry errorCodes opt in an otherwise non-retryable error', async () => {
+  let attempts = 0;
+  const client = createHttpClient({
+    retry: { limit: 1, errorCodes: ['ERR_RATE_LIMIT_QUEUE_TIMEOUT'], delay: 0 },
+    adapter: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new HttpError('queue timed out', { code: 'ERR_RATE_LIMIT_QUEUE_TIMEOUT' });
+      }
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  assert.deepEqual(await client.get('/retry-error-code'), {});
+  assert.equal(attempts, 2);
+});
+
+test('retry respects Retry-After and caps the final jittered delay', async () => {
+  let seenDelay = -1;
+  const client = createHttpClient({
+    adapter: async () => new Response('{}', {
+      status: 503,
+      headers: { 'retry-after': '2' },
+    }),
+  });
+
+  await assert.rejects(client.get('/retry-after', {
+    retry: {
+      limit: 1,
+      statusCodes: [503],
+      delay: 100,
+      maxDelay: 50,
+      jitter: () => 250,
+      shouldRetry: ({ delay }) => {
+        seenDelay = delay;
+        return false;
+      },
+    },
+  }));
+  assert.equal(seenDelay, 50);
+});
+
+test('retry can ignore Retry-After when explicitly disabled', async () => {
+  let seenDelay = -1;
+  const client = createHttpClient({
+    adapter: async () => new Response('{}', {
+      status: 503,
+      headers: { 'retry-after': '2' },
+    }),
+  });
+
+  await assert.rejects(client.get('/retry-after-disabled', {
+    retry: {
+      limit: 1,
+      statusCodes: [503],
+      delay: 100,
+      respectRetryAfter: false,
+      shouldRetry: ({ delay }) => {
+        seenDelay = delay;
+        return false;
+      },
+    },
+  }));
+  assert.equal(seenDelay, 100);
+});
+
 test('cancels a pending fulfilled response interceptor on single-attempt timeout', async () => {
   const client = createHttpClient({
     timeout: 10,

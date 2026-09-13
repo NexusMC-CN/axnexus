@@ -118,7 +118,21 @@ export async function runRequestPipeline<T>(
     const initialResolved = resolved;
     const retry = normalizeRetry(initialResolved.retry, defaults.retry);
     const maxRetries = retry.limit ?? 0;
-    const retryOn = new Set((initialResolved.retryOn ?? defaults.retryOn ?? retry.statusCodes ?? DEFAULT_RETRY_ON).filter(Number.isFinite));
+    const requestRetryOptions = interceptedConfig.retry && typeof interceptedConfig.retry === 'object'
+      ? interceptedConfig.retry
+      : undefined;
+    const defaultRetryOptions = defaults.retry && typeof defaults.retry === 'object'
+      ? defaults.retry
+      : undefined;
+    // Resolve both public status-code APIs once so response classification and
+    // retry decisions always use the same request-level precedence.
+    const retryOn = new Set((
+      interceptedConfig.retryOn
+      ?? requestRetryOptions?.statusCodes
+      ?? defaults.retryOn
+      ?? defaultRetryOptions?.statusCodes
+      ?? DEFAULT_RETRY_ON
+    ).filter(Number.isFinite));
     const retryUnsafeMethods = initialResolved.retryUnsafeMethods ?? defaults.retryUnsafeMethods ?? false;
     initialResolved.retryUnsafeMethods = retryUnsafeMethods;
     const timeoutMs = normalizeTimeout(initialResolved.timeout ?? defaults.timeout);
