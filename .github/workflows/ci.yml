@@ -39,4 +39,4 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Run Bun tests
-        run: npm run test:bun
+        run: bun run test:bun

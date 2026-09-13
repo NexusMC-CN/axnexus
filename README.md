@@ -578,7 +578,7 @@ npm run build
 npm run test:bun
 ```
 
-`npm test` 是 Node.js 测试入口，`npm run test:bun` 需要本机已安装 Bun；两者都会先生成最新的 `dist/`。构建产物位于 `dist/`，包不需要 AVMCBBS 或其他业务项目才能构建和测试。
+`npm test` 是 Node.js 测试入口；`npm run test:bun` 或 `bun run test:bun` 需要本机已安装 Bun。两者都会先生成最新的 `dist/`，其中 Bun 入口使用 `bun x tsc` 编译。构建产物位于 `dist/`，包不需要 AVMCBBS 或其他业务项目才能构建和测试。
 
 ## 许可证
 
