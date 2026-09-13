@@ -460,7 +460,9 @@ test('http2 adapter serializes Blob and URLSearchParams request bodies', async (
   blobStream.emit('end');
   await blobPromise;
   assert.deepEqual(Array.from(blobStream.endBody as Uint8Array), Array.from(new TextEncoder().encode('hello')));
-  assert.equal(blobStream.requestHeaders?.['content-type'], 'text/plain');
+  // Bun normalizes Blob.type by appending `charset=utf-8`; both forms are
+  // valid for this body when the caller did not provide an explicit header.
+  assert.match(blobStream.requestHeaders?.['content-type'] ?? '', /^text\/plain(?:;charset=utf-8)?$/i);
 
   const paramsPromise = adapter({
     url: 'https://example.test/params', method: 'POST', headers: new Headers(),

@@ -2,6 +2,8 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { HttpError, createFetchAdapter } from '../../dist/index.js';
 
+const isBunRuntime = Boolean((globalThis as { Bun?: unknown }).Bun);
+
 test('fetch adapter reports download progress from response stream', async () => {
   const originalFetch = globalThis.fetch;
   const events: number[] = [];
@@ -92,7 +94,7 @@ test('fetch adapter reports a clear error when fetch is unavailable', async () =
   }
 });
 
-test('fetch adapter enables Node duplex for readable stream uploads', async () => {
+test('fetch adapter enables duplex only for Node readable stream uploads', async () => {
   const originalFetch = globalThis.fetch;
   let seenInit: RequestInit | undefined;
   const adapter = createFetchAdapter(async (_input, init) => {
@@ -109,7 +111,7 @@ test('fetch adapter enables Node duplex for readable stream uploads', async () =
     await adapter({
       url: 'https://example.test', method: 'POST', headers: new Headers(), body,
     } as never);
-    assert.equal((seenInit as RequestInit & { duplex?: string } | undefined)?.duplex, 'half');
+    assert.equal((seenInit as RequestInit & { duplex?: string } | undefined)?.duplex, isBunRuntime ? undefined : 'half');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -161,6 +163,27 @@ test('fetch adapter forwards native and Node-specific request options', async ()
   assert.equal(seenInit?.cache, 'no-store');
   assert.equal(seenInit?.priority, 'high');
   assert.equal(seenInit?.window, null);
-  assert.equal(seenInit?.dispatcher, dispatcher);
-  assert.equal(seenInit?.agent, agent);
+  assert.equal(seenInit?.dispatcher, isBunRuntime ? undefined : dispatcher);
+  assert.equal(seenInit?.agent, isBunRuntime ? undefined : agent);
+});
+
+test('fetch adapter does not forward Node-only transport options to Bun', { skip: !isBunRuntime }, async () => {
+  let seenInit: (RequestInit & { dispatcher?: unknown; agent?: unknown; duplex?: string }) | undefined;
+  const adapter = createFetchAdapter(async (_input, init) => {
+    seenInit = init as typeof seenInit;
+    return new Response('ok');
+  });
+
+  await adapter({
+    url: 'https://example.test',
+    method: 'GET',
+    headers: new Headers(),
+    dispatcher: { dispatch() {} },
+    agent: { protocol: 'https:' },
+    duplex: 'half',
+  } as never);
+
+  assert.equal(seenInit?.dispatcher, undefined);
+  assert.equal(seenInit?.agent, undefined);
+  assert.equal(seenInit?.duplex, undefined);
 });

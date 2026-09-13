@@ -10,9 +10,21 @@ function contentLength(response: Response): number | undefined {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function runtimeVersions(): { node?: string; bun?: string } | undefined {
+  return (globalThis as {
+    process?: { versions?: { node?: string; bun?: string } };
+  }).process?.versions;
+}
+
+function isBunRuntime(): boolean {
+  return Boolean(runtimeVersions()?.bun);
+}
+
 function isNodeRuntime(): boolean {
-  const processLike = (globalThis as { process?: { versions?: { node?: string } } }).process;
-  return Boolean(processLike?.versions?.node);
+  // Bun exposes a Node-compatible process object, but its Fetch extensions are
+  // different from Undici's dispatcher/agent/duplex options.
+  const versions = runtimeVersions();
+  return Boolean(versions?.node && !isBunRuntime());
 }
 
 function isReadableStreamBody(value: unknown): value is ReadableStream<Uint8Array> {
@@ -50,7 +62,7 @@ export function createFetchAdapter(fetchImpl?: typeof globalThis.fetch): HttpAda
     if (fetchCache !== undefined) init.cache = fetchCache;
     if (config.window !== undefined) init.window = config.window;
     if (config.priority !== undefined) init.priority = config.priority;
-    if (config.duplex !== undefined) init.duplex = config.duplex;
+    if (isNodeRuntime() && config.duplex !== undefined) init.duplex = config.duplex;
     // `dispatcher` and `agent` are Node-specific extensions. Passing them to
     // browsers can make otherwise valid requests fail strict RequestInit
     // validation, so keep them on the Node path only.

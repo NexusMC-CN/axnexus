@@ -4,7 +4,7 @@
 
 ## 特性
 
-- 零运行时依赖，支持现代浏览器和 Node.js 18+。
+- 零运行时依赖，支持现代浏览器、Node.js 18+ 和 Bun（根入口已在 Bun 1.4.2 验证）。
 - 提供 `get`、`head`、`options`、`trace`、`connect`、`post`、`put`、`patch`、`delete` 和通用 `request` 方法。
 - 自动处理 JSON、文本、`Blob`、`ArrayBuffer`、`FormData` 和 `Response`。
 - 支持请求/响应拦截器、请求 ID、超时、`AbortSignal` 和可配置重试。
@@ -83,7 +83,7 @@ const result = await http.get('/items', {
 
 `params` 使用 `URLSearchParams` 编码，数组会生成重复的 query key，`null` 和 `undefined` 会被跳过。相对路径会与 `baseURL` 合并；如果不允许绝对 URL，可以设置 `allowAbsoluteURL: false`。
 
-客户端缓存使用 `cache: { ttl }` 或 `cache: false`；如果需要把原生 Fetch 的缓存模式传给 adapter，请使用 `fetchCache`（或等价的 `requestCache`），例如 `fetchCache: 'no-store'`。Node Fetch 的 `dispatcher`/`agent`、标准 `priority`、`window` 和 `duplex` 也会按运行环境透传。
+客户端缓存使用 `cache: { ttl }` 或 `cache: false`；如果需要把原生 Fetch 的缓存模式传给 adapter，请使用 `fetchCache`（或等价的 `requestCache`），例如 `fetchCache: 'no-store'`。Node Fetch 的 `dispatcher`/`agent`/`duplex` 只在 Node 运行时透传，标准 `priority` 和 `window` 则按运行环境透传；Bun 的专有 Fetch 选项不会自动混入通用配置。
 
 普通对象、数组、数字、布尔值和 `null` 会自动 JSON 序列化。字符串、`FormData`、`Blob`、`ArrayBuffer`、`URLSearchParams` 和其他 `BodyInit` 会原样传递。
 
@@ -478,7 +478,7 @@ http.interceptors.request.use(csrf);
 
 ## HTTP/2 和 HTTP/3
 
-HTTP/2 只在 Node 环境通过独立入口启用，adapter 会按 origin 复用 session，并在完整响应中标记 `protocol: 'h2'`：
+HTTP/2 通过独立入口启用，adapter 会按 origin 复用 session，并在完整响应中标记 `protocol: 'h2'`。Node 使用原生 `node:http2`；Bun 使用其 Node 兼容层时建议按实验性能力验证：
 
 ```typescript
 import { createHttpClient } from 'axnexus';
@@ -501,6 +501,19 @@ const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) })
 ```
 
 没有注入 transport 时会抛出 `ERR_UNSUPPORTED_ADAPTER`。默认入口不会加载 Node 内置模块，也不会把 HTTP/1.1 Fetch 请求误标为 HTTP/2 或 HTTP/3。Node HTTP/2 的 `ReadableStream` 请求体会在读取期间响应取消；不可重放的流请求不会自动重试。
+
+### Bun 运行时
+
+根入口使用标准 Fetch、Headers、Response、ReadableStream、Blob 和 AbortSignal，在 Bun 下可以直接使用。仓库提供 `npm run test:bun`，会先构建产物，再用 Bun 测试完整测试目录；CI 当前固定使用 Bun 1.4.2。
+
+| 入口/功能 | Bun 状态 | 说明 |
+| --- | --- | --- |
+| `axnexus` | 已验证 | 默认 Fetch、`fetchJson`、Standard Schema、流式上传和取消均通过冒烟检查 |
+| `axnexus/node-http2` | 实验性 | Bun 的 `node:http2` 客户端/服务端可用，但与 Node 并非完全一致，生产环境应覆盖 TLS、ALPN、session 复用和错误隔离 |
+| `axnexus/node-http3` | 需注入 transport | 不绑定 Bun 的实验性 `node:quic`，由调用方提供 QUIC transport |
+| XHR adapter | 浏览器专用 | Bun 没有浏览器 XHR 时会返回 `ERR_UNSUPPORTED_ADAPTER`，不会自动 polyfill |
+
+Bun 会对部分 `Blob.type` 值补充 `charset=utf-8`；HTTP/2 请求需要固定媒体类型时，请显式传入 `Content-Type`。Bun 还提供 `proxy`、`tls`、`unix`、`protocol`、`decompress` 和 `verbose` 等扩展，本包暂不把它们加入跨运行时的 `RequestConfig`；需要这些能力时应通过自定义 Fetch adapter 传递。详见 [Bun Fetch 文档](https://bun.sh/docs/runtime/networking/fetch)、[Bun Node.js 兼容性](https://bun.sh/docs/runtime/nodejs-compat) 和 [Bun 模块解析](https://bun.sh/docs/runtime/module-resolution)。
 
 ## 运行环境差异
 
@@ -562,9 +575,10 @@ src/
 npm install
 npm test
 npm run build
+npm run test:bun
 ```
 
-构建产物位于 `dist/`，包不需要 AVMCBBS 或其他业务项目才能构建和测试。
+`npm test` 是 Node.js 测试入口，`npm run test:bun` 需要本机已安装 Bun；两者都会先生成最新的 `dist/`。构建产物位于 `dist/`，包不需要 AVMCBBS 或其他业务项目才能构建和测试。
 
 ## 许可证
 
