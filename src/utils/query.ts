@@ -4,7 +4,7 @@ function stringifyValue(value: QueryValue): string {
   return value instanceof Date ? value.toISOString() : String(value);
 }
 
-export function serializeParams(params: QueryParams | undefined): string {
+export function serializeParams(params: Readonly<QueryParams> | undefined): string {
   if (!params) return '';
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -35,7 +35,7 @@ export function resolveURL(baseURL = '', path = '', allowAbsoluteURL = true): st
   return `${base}/${target.replace(/^\/+/, '')}`;
 }
 
-export function appendQuery(url: string, params?: QueryParams): string {
+export function appendQuery(url: string, params?: Readonly<QueryParams>): string {
   const query = serializeParams(params);
   if (!query) return url;
   const hashIndex = url.indexOf('#');
