@@ -57,7 +57,9 @@ export class ResponseCache<T = unknown> {
     }
 
     const existing = this.inflight.get(key);
-    if (cached && cached.staleUntil > now) {
+    if (cached && staleWindow > 0 && cached.staleUntil > now) {
+      // A configured SWR window serves the stale value immediately and
+      // refreshes in the background.
       if (!existing) void this.refresh(key, loader, ttl, staleWindow, policy.staleIfError).catch(() => undefined);
       return clone(cached.value);
     }
@@ -71,9 +73,17 @@ export class ResponseCache<T = unknown> {
       this.generation += 1;
       this.entries.clear();
       this.inflight.clear();
+      // Invalidation generations are only meaningful for keys that were (or
+      // are about to be) stored. Dropping them with the entries keeps a
+      // long-lived cache from retaining metadata for every key ever cleared.
+      this.keyGenerations.clear();
       return;
     }
-    this.keyGenerations.set(key, (this.keyGenerations.get(key) ?? 0) + 1);
+    // Only record a generation for keys this cache actually knows about;
+    // otherwise every `clear` of an unknown key would leak a map entry.
+    if (this.entries.has(key) || this.inflight.has(key) || this.keyGenerations.has(key)) {
+      this.keyGenerations.set(key, (this.keyGenerations.get(key) ?? 0) + 1);
+    }
     this.entries.delete(key);
     this.inflight.delete(key);
   }
@@ -107,7 +117,11 @@ export class ResponseCache<T = unknown> {
       }
       return value;
     }).catch((error) => {
-      if (staleIfError && previous && previous.staleUntil > this.now()) return previous.value;
+      // stale-if-error falls back to the previous value whenever the refresh
+      // fails and that value is still considered usable. Without an SWR window
+      // `staleUntil` equals `expiresAt`, so requiring `staleUntil > now` would
+      // make the fallback unreachable for the common `ttl`-only configuration.
+      if (staleIfError && previous) return previous.value;
       throw error;
     }).finally(() => {
       if (this.inflight.get(key) === pending) this.inflight.delete(key);

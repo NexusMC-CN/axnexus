@@ -1,5 +1,5 @@
 import { AxiosHeaders } from '../headers/headers.js';
-import { readErrorPayload, readResponse } from '../utils/response.js';
+import { readErrorPayload, markResponseMethod, readResponse } from '../utils/response.js';
 import { applyResponseTransforms } from './config.js';
 import { combineSignals, raceWithSignal, signalReason, TIMEOUT_REASON } from './control.js';
 import { responseInterceptorError, toError, HttpError } from './errors.js';
@@ -29,6 +29,14 @@ export interface ExecuteAttemptOptions {
   totalTimeoutEnabled: boolean;
   totalTimeoutTriggered: () => boolean;
   rateLimiter?: RateLimiter;
+  /**
+   * Called once the adapter has produced a response and before the response
+   * interceptor chain runs. Response interceptors may issue nested requests
+   * through the same client, so the caller uses this hook to release the rate
+   * limiter's concurrency slot and avoid deadlocking a `maxConcurrent: 1`
+   * client.
+   */
+  onAdapterSettled?: () => void;
 }
 
 function responseMessage(payload: unknown, status: number): string {
@@ -68,6 +76,7 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     totalTimeoutEnabled,
     totalTimeoutTriggered,
     rateLimiter,
+    onAdapterSettled,
   } = options;
   const attemptSignals = combineSignals([
     overallSignal,
@@ -108,9 +117,30 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     const rawResponse = adapterOutput instanceof Response
       ? adapterOutput
       : (adapterOutput as AdapterResult).response;
+    // Tag the response with its request method so body handling can recognize a
+    // HEAD probe, whose Content-Length describes the matching GET resource.
+    markResponseMethod(rawResponse, attemptConfig.method);
+    // The adapter's network work is done. Let the caller hand back the rate
+    // limiter slot before any user callback below can issue a nested request.
+    onAdapterSettled?.();
     const metadata = adapterOutput instanceof Response ? undefined : (adapterOutput as AdapterResult).metadata;
     const headersAt = Date.now();
-    if (statusShouldThrow(attemptConfig, rawResponse.status)) {
+    let shouldThrow: boolean;
+    try {
+      shouldThrow = statusShouldThrow(attemptConfig, rawResponse.status);
+    } catch (cause) {
+      // A local status policy that throws is a configuration/programming error,
+      // not a transport failure. Classify it separately so it is not reported as
+      // ERR_NETWORK and is not retried as a transient network problem.
+      throw new HttpError('Status validation callback failed', {
+        code: 'ERR_INVALID_STATUS_POLICY',
+        status: rawResponse.status,
+        config: attemptConfig,
+        retryable: false,
+        cause,
+      });
+    }
+    if (shouldThrow) {
       const payload = await readResponsePayload(rawResponse, config.maxBodySize, attemptConfig.signal);
       const response: HttpResponse<unknown> = {
         data: payload,
@@ -144,8 +174,13 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
       config.parseJson,
       attemptConfig.signal,
     );
-    let validatedData = data;
-    if (validatedData !== null && config.schema) {
+    // `undefined` means the response carried no payload at all (204/HEAD/empty
+    // body). An explicit JSON `null` is a real value and must still be
+    // validated, so it is not treated as "no data". The public client contract
+    // reports an absent payload as `null` while still validating a JSON null.
+    const hasPayload = data !== undefined;
+    let validatedData: unknown = hasPayload ? data : null;
+    if (config.schema && hasPayload) {
       try {
         validatedData = await raceWithSignal(validateStandardSchema(validatedData, config.schema), attemptConfig.signal);
       } catch (cause) {

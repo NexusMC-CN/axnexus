@@ -12,7 +12,7 @@ export interface RateLimitOptions {
 }
 
 interface Task<T> {
-  run: () => Promise<T> | T;
+  run: (release: () => void) => Promise<T> | T;
   options: RateLimitOptions;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
@@ -20,14 +20,34 @@ interface Task<T> {
   timer?: ReturnType<typeof setTimeout>;
   settled: boolean;
   abort?: () => void;
+  /** Set once the concurrency slot has been handed back. */
+  released?: boolean;
+}
+
+/** One request-rate window observed for a resource group. */
+interface RequestWindow {
+  interval: number;
+  times: number[];
 }
 
 interface LimitState {
   active: number;
-  requestTimes: number[];
+  /**
+   * Request timestamps per window length. A group can be limited with several
+   * different `interval` values, and a short window must not discard records
+   * that a concurrently configured long window still needs.
+   */
+  windows: RequestWindow[];
   byteTokens: number;
   byteUpdatedAt: number;
   byteRate: number;
+}
+
+/** Idle groups are reclaimed so dynamic group names cannot grow without bound. */
+const GROUP_IDLE_MS = 300_000;
+
+interface GroupMeta {
+  lastUsed: number;
 }
 
 export class RateLimiter {
@@ -36,12 +56,25 @@ export class RateLimiter {
   private sequence = 0;
   private pumping = false;
   private readonly states = new Map<string, LimitState>();
+  private readonly groupMeta = new Map<string, GroupMeta>();
+  /** A single coalesced wake-up timer for the whole scheduler. */
+  private wakeTimer?: ReturnType<typeof setTimeout>;
 
   constructor(options: RateLimitOptions = {}) {
     this.defaults = { ...options };
   }
 
-  run<T>(run: () => Promise<T> | T, options: RateLimitOptions = {}): Promise<T> {
+  /** Number of resource groups currently tracked. Exposed for diagnostics/tests. */
+  groupCount(): number {
+    return this.states.size;
+  }
+
+  /**
+   * Schedule `run` under the configured limits. `run` receives a `release`
+   * callback that returns its concurrency slot early; call it before awaiting
+   * work that may itself need a slot from this limiter.
+   */
+  run<T>(run: (release: () => void) => Promise<T> | T, options: RateLimitOptions = {}): Promise<T> {
     const merged = { ...this.defaults, ...options };
     return new Promise<T>((resolve, reject) => {
       const task: Task<T> = { run, options: merged, resolve, reject, sequence: this.sequence += 1, settled: false };
@@ -88,11 +121,23 @@ export class RateLimiter {
     if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0 || remaining === 0) return;
     const key = merged.resourceGroup || '__global__';
     const now = Date.now();
-    const state = this.states.get(key) ?? { active: 0, requestTimes: [], byteTokens: bytesPerSecond, byteUpdatedAt: now, byteRate: bytesPerSecond };
+    const state = this.states.get(key) ?? {
+      active: 0,
+      windows: [],
+      byteTokens: bytesPerSecond,
+      byteUpdatedAt: now,
+      byteRate: bytesPerSecond,
+    };
     this.states.set(key, state);
+    this.touchGroup(key, now);
     if (state.byteRate !== bytesPerSecond) {
+      // Keep the already-earned tokens when the configured rate changes.
+      // Refilling to a full second of quota would hand out a fresh burst on
+      // every rate switch and let alternating rates bypass the limit.
+      const elapsed = Math.max(0, now - state.byteUpdatedAt) / 1000;
+      const carried = Math.min(state.byteTokens + elapsed * state.byteRate, state.byteRate);
+      state.byteTokens = Math.min(carried, bytesPerSecond);
       state.byteRate = bytesPerSecond;
-      state.byteTokens = bytesPerSecond;
       state.byteUpdatedAt = now;
     }
     while (true) {
@@ -106,8 +151,19 @@ export class RateLimiter {
         remaining -= consume;
         if (remaining <= 0) return;
       }
-      const deficit = remaining - state.byteTokens;
+      // The bucket holds at most one second of quota, so a chunk larger than
+      // that can never be satisfied in a single wait. Sleeping for the whole
+      // remaining deficit would over-wait: the tokens earned during that sleep
+      // are capped at one second's worth, and the leftover deficit would then
+      // be waited for a second time. Wait only until the next refill can supply
+      // more tokens, then re-evaluate.
+      const needed = remaining - state.byteTokens;
+      const waitMs = Math.max(
+        1,
+        Math.ceil(Math.min(needed, bytesPerSecond) / bytesPerSecond * 1000),
+      );
       state.byteTokens = 0;
+      state.byteUpdatedAt = now;
       await new Promise<void>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const onAbort = () => {
@@ -119,17 +175,77 @@ export class RateLimiter {
         timer = setTimeout(() => {
           merged.signal?.removeEventListener('abort', onAbort);
           resolve();
-        }, Math.max(1, Math.ceil((deficit / bytesPerSecond) * 1000)));
+        }, waitMs);
         merged.signal?.addEventListener('abort', onAbort, { once: true });
         if (merged.signal?.aborted) onAbort();
       });
     }
   }
 
+  /** Drop groups that have been idle and have no active tasks. */
+  private evictIdleGroups(now: number): void {
+    if (this.states.size === 0) return;
+    for (const [key, meta] of this.groupMeta) {
+      if (now - meta.lastUsed < GROUP_IDLE_MS) continue;
+      const state = this.states.get(key);
+      if (state && state.active > 0) continue;
+      if (this.queue.some((task) => (task.options.resourceGroup || '__global__') === key)) continue;
+      this.states.delete(key);
+      this.groupMeta.delete(key);
+    }
+  }
+
+  private touchGroup(key: string, now: number): void {
+    const meta = this.groupMeta.get(key);
+    if (meta) meta.lastUsed = now;
+    else this.groupMeta.set(key, { lastUsed: now });
+    // Opportunistic reclamation keeps dynamic group names bounded.
+    if (this.groupMeta.size > 64) this.evictIdleGroups(now);
+  }
+
+  private stateFor(key: string, now: number, byteRate: number): LimitState {
+    const existing = this.states.get(key);
+    if (existing) {
+      this.touchGroup(key, now);
+      return existing;
+    }
+    const created: LimitState = {
+      active: 0,
+      windows: [],
+      byteTokens: byteRate,
+      byteUpdatedAt: now,
+      byteRate,
+    };
+    this.states.set(key, created);
+    this.groupMeta.set(key, { lastUsed: now });
+    return created;
+  }
+
+  private windowFor(state: LimitState, interval: number): RequestWindow {
+    let window = state.windows.find((candidate) => candidate.interval === interval);
+    if (!window) {
+      window = { interval, times: [] };
+      state.windows.push(window);
+    }
+    return window;
+  }
+
+  /** Coalesce wake-ups: many queued tasks must not create many timers. */
+  private scheduleWake(delayMs: number): void {
+    if (this.wakeTimer) return;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = undefined;
+      this.pump();
+    }, Math.max(1, delayMs));
+    // Do not keep the event loop alive for a scheduler-only wake-up.
+    (this.wakeTimer as { unref?: () => void }).unref?.();
+  }
+
   private pump(): void {
     if (this.pumping) return;
     this.pumping = true;
     try {
+      this.evictIdleGroups(Date.now());
       while (this.queue.length) {
         this.queue.sort((a, b) => (Number(b.options.priority) || 0) - (Number(a.options.priority) || 0) || a.sequence - b.sequence);
         const now = Date.now();
@@ -140,39 +256,57 @@ export class RateLimiter {
           if (candidate.settled) continue;
           const key = candidate.options.resourceGroup || '__global__';
           const byteRate = Math.max(0, Number(candidate.options.bytesPerSecond ?? this.defaults.bytesPerSecond) || 0);
-          const state = this.states.get(key) ?? { active: 0, requestTimes: [], byteTokens: byteRate, byteUpdatedAt: Date.now(), byteRate };
-          this.states.set(key, state);
+          const state = this.stateFor(key, now, byteRate);
           const limit = Math.max(1, Math.floor(Number(candidate.options.maxConcurrent ?? this.defaults.maxConcurrent) || Infinity));
           if (state.active >= limit) continue;
           const interval = Math.max(0, Number(candidate.options.interval ?? this.defaults.interval) || 0);
           const maxRequests = Math.max(0, Math.floor(Number(candidate.options.requestsPerInterval ?? this.defaults.requestsPerInterval) || 0));
-          while (state.requestTimes.length && now - state.requestTimes[0] >= interval) state.requestTimes.shift();
-          if (maxRequests > 0 && interval > 0 && state.requestTimes.length >= maxRequests) {
-            retryAfter = Math.min(retryAfter, Math.max(1, interval - (now - state.requestTimes[0])));
-            continue;
+          // Only this candidate's own window is trimmed. Trimming every window
+          // with the candidate's interval would let a short window delete
+          // history that a longer window still needs.
+          const window = interval > 0 ? this.windowFor(state, interval) : undefined;
+          if (window) {
+            while (window.times.length && now - window.times[0] >= interval) window.times.shift();
+            if (maxRequests > 0 && window.times.length >= maxRequests) {
+              retryAfter = Math.min(retryAfter, Math.max(1, interval - (now - window.times[0])));
+              continue;
+            }
           }
           selected = index;
           break;
         }
         if (selected < 0) {
-          if (retryAfter < Infinity) setTimeout(() => this.pump(), retryAfter);
+          if (retryAfter < Infinity) this.scheduleWake(retryAfter);
           break;
         }
         const [task] = this.queue.splice(selected, 1);
         if (!task || task.settled) continue;
         const key = task.options.resourceGroup || '__global__';
         const state = this.states.get(key) as LimitState;
-        state.requestTimes.push(now);
+        const interval = Math.max(0, Number(task.options.interval ?? this.defaults.interval) || 0);
+        if (interval > 0) this.windowFor(state, interval).times.push(now);
         state.active += 1;
+        this.touchGroup(key, now);
         task.settled = true;
         if (task.timer) clearTimeout(task.timer);
+        // A running task can hand its concurrency slot back early. This lets a
+        // task whose network work is finished run user callbacks (such as
+        // response interceptors or retry hooks) that may themselves need a
+        // slot, without deadlocking a `maxConcurrent: 1` scheduler.
+        const release = () => {
+          if (task.released) return;
+          task.released = true;
+          state.active = Math.max(0, state.active - 1);
+          this.touchGroup(key, Date.now());
+          this.pump();
+        };
         const cleanup = () => {
-          state.active -= 1;
+          release();
           if (task.abort) task.options.signal?.removeEventListener('abort', task.abort);
           this.pump();
         };
         void Promise.resolve()
-          .then(task.run)
+          .then(() => task.run(release))
           .then(task.resolve, task.reject)
           .then(cleanup, cleanup);
       }

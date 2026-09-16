@@ -8,6 +8,58 @@ function assertSize(size: number, maxBodySize: number | undefined): void {
   }
 }
 
+/** 204/205/304 never carry a payload. */
+function isPayloadForbidden(status: number): boolean {
+  return status === 204 || status === 205 || status === 304;
+}
+
+/**
+ * A response that cannot carry a body but may still advertise the size of the
+ * corresponding GET resource. `Content-Length` must not be enforced as a real
+ * payload size for HEAD, and callers must not be told bytes were transferred.
+ */
+function hasNoBody(response: Response): boolean {
+  return isPayloadForbidden(response.status);
+}
+
+/** Attach the request method so body enforcement can recognize a HEAD probe. */
+const RESPONSE_METHOD = Symbol('axnexus.responseMethod');
+
+export function markResponseMethod(response: Response, method: string | undefined): Response {
+  if (!method) return response;
+  try {
+    Object.defineProperty(response, RESPONSE_METHOD, {
+      value: method.toUpperCase(),
+      configurable: true,
+      enumerable: false,
+    });
+  } catch {
+    // Frozen or exotic Response implementations simply keep the status check.
+  }
+  return response;
+}
+
+function responseMethod(response: Response): string | undefined {
+  const tagged = (response as Response & { [RESPONSE_METHOD]?: string })[RESPONSE_METHOD];
+  if (tagged) return tagged;
+  const method = (response as Response & { method?: unknown }).method;
+  return typeof method === 'string' ? method.toUpperCase() : undefined;
+}
+
+/** True when the response transfers no payload (HEAD or a bodyless status). */
+function carriesNoPayload(response: Response): boolean {
+  if (responseMethod(response) === 'HEAD') return true;
+  return hasNoBody(response);
+}
+
+function declaredSize(response: Response): number | undefined {
+  const raw = response.headers.get('content-length');
+  if (raw === null || !raw.trim()) return undefined;
+  const declared = Number(raw);
+  if (!Number.isFinite(declared) || declared < 0) return undefined;
+  return declared;
+}
+
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
 }
@@ -86,9 +138,48 @@ async function readChunk(
   });
 }
 
-async function readBytes(response: Response, maxBodySize?: number, signal?: AbortSignal): Promise<Uint8Array> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared >= 0) assertSize(declared, maxBodySize);
+/**
+ * Stop a response body we are no longer going to read. Cancelling the stream is
+ * the only way to release the underlying connection once we have decided the
+ * payload will not be consumed (over-limit payloads, aborted reads, discarded
+ * error responses).
+ */
+export function cancelBody(response: Response, reason?: unknown): void {
+  try {
+    const body = response.body;
+    if (!body) return;
+    if (typeof body.cancel === 'function' && !body.locked) {
+      void Promise.resolve(body.cancel(reason)).catch(() => undefined);
+      return;
+    }
+    // A locked stream still owns the connection: release it through a reader.
+    const reader = body.getReader();
+    void Promise.resolve(reader.cancel(reason)).catch(() => undefined).then(
+      () => { try { reader.releaseLock(); } catch { /* already released */ } },
+      () => { try { reader.releaseLock(); } catch { /* already released */ } },
+    );
+  } catch {
+    // Cleanup is advisory; the size/abort error is what the caller needs.
+  }
+}
+
+async function readBytes(
+  response: Response,
+  maxBodySize?: number,
+  signal?: AbortSignal,
+  declared?: number,
+): Promise<Uint8Array> {
+  // Only enforce a declared length when the response can actually carry one.
+  // A HEAD resource probe legitimately reports the size of the corresponding
+  // GET representation while transferring zero bytes.
+  if (!carriesNoPayload(response) && declared !== undefined) {
+    try {
+      assertSize(declared, maxBodySize);
+    } catch (error) {
+      cancelBody(response, error);
+      throw error;
+    }
+  }
   if (!response.body) {
     const bytes = new Uint8Array(await readAbortable(response.arrayBuffer(), signal));
     assertSize(bytes.byteLength, maxBodySize);
@@ -102,7 +193,14 @@ async function readBytes(response: Response, maxBodySize?: number, signal?: Abor
       const result = await readChunk(reader, signal);
       if (result.done) break;
       size += result.value.byteLength;
-      assertSize(size, maxBodySize);
+      try {
+        assertSize(size, maxBodySize);
+      } catch (error) {
+        // Cancel the source before surfacing the error: the caller will not
+        // read any further, and an open stream keeps the connection alive.
+        try { void reader.cancel(error).catch(() => undefined); } catch { /* stream already failed */ }
+        throw error;
+      }
       chunks.push(result.value);
     }
   } catch (error) {
@@ -128,15 +226,23 @@ export async function readResponse(
   maxBodySize?: number,
   parseJson: JsonParser = (text) => JSON.parse(text),
   signal?: AbortSignal,
-): Promise<unknown> {
+): Promise<unknown | undefined> {
   if (type === 'response') return response;
-  if ([204, 205, 304].includes(response.status) || response.headers.get('content-length') === '0') return null;
-  const bytes = await readBytes(response, maxBodySize, signal);
-  if (!bytes.byteLength) return null;
+  // No payload at all: 204/205/304 and HEAD. Distinct from a JSON `null` body,
+  // which is a real value that schema validation must still see.
+  if (carriesNoPayload(response)) return undefined;
+  const bytes = await readBytes(response, maxBodySize, signal, declaredSize(response));
+  if (!bytes.byteLength) return undefined;
   if (type === 'arrayBuffer') return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  if (type === 'blob') return new Blob([bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer]);
+  if (type === 'blob') {
+    // Re-create the Blob with the response MIME type; without it callers lose
+    // the metadata used for file validation, previews and re-uploads.
+    const contentType = response.headers.get('content-type');
+    const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    return contentType ? new Blob([source], { type: contentType }) : new Blob([source]);
+  }
   const raw = new TextDecoder().decode(bytes);
-  if (!raw.trim()) return null;
+  if (!raw.trim()) return undefined;
   if (type === 'text') return raw;
   try {
     return await readAbortable(Promise.resolve().then(() => parseJson(raw)), signal);
@@ -147,11 +253,17 @@ export async function readResponse(
 }
 
 export async function readErrorPayload(response: Response, maxBodySize?: number, signal?: AbortSignal): Promise<unknown> {
+  // `Response.clone()` tees the stream: cancelling the clone does not cancel
+  // the underlying source, so the original response must be released too.
+  const clone = response.clone();
   try {
-    const text = await readResponse(response.clone(), 'text', maxBodySize, undefined, signal) as string | null;
-    if (!text?.trim()) return null;
+    const text = await readResponse(clone, 'text', maxBodySize, undefined, signal) as string | null | undefined;
+    cancelBody(response);
+    if (typeof text !== 'string' || !text.trim()) return null;
     try { return JSON.parse(text); } catch { return text; }
   } catch (error) {
+    cancelBody(clone, error);
+    cancelBody(response, error);
     if (signal?.aborted) throw error;
     return null;
   }

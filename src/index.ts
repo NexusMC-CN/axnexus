@@ -55,6 +55,6 @@ export type {
   AdapterConfig,
   HttpAdapterFactory,
 } from './adapters/types.js';
-export { readResponse, readErrorPayload } from './utils/response.js';
+export { readResponse, readErrorPayload, cancelBody } from './utils/response.js';
 export { encodeBody, isPlainBody } from './utils/body.js';
 export { sanitizeHeaderName, sanitizeHeaderValue } from './security/header-sanitizer.js';

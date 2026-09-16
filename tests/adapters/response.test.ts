@@ -17,21 +17,27 @@ test('treats omitted and invalid maxBodySize values as unlimited', async () => {
   assert.equal(await readResponse(new Response('12345'), 'text', Number.POSITIVE_INFINITY), '12345');
 });
 
-test('treats all bodyless HTTP statuses as null responses', async () => {
+test('treats all bodyless HTTP statuses as absent payloads', async () => {
   for (const status of [204, 205, 304]) {
     const response = new Response(null, { status });
-    assert.equal(await readResponse(response, 'json'), null);
+    // `undefined` means "no payload at all", which is distinct from a JSON
+    // `null` body that schema validation must still see.
+    assert.equal(await readResponse(response, 'json'), undefined);
   }
 });
 
-test('treats a whitespace-only JSON response as an empty response', async () => {
+test('treats a whitespace-only JSON response as an absence of payload', async () => {
   let parserCalls = 0;
   const value = await readResponse(new Response(' \n\t '), 'json', undefined, () => {
     parserCalls += 1;
     return JSON.parse('never');
   });
-  assert.equal(value, null);
+  assert.equal(value, undefined);
   assert.equal(parserCalls, 0);
+});
+
+test('distinguishes a JSON null payload from an absent payload', async () => {
+  assert.equal(await readResponse(new Response('null'), 'json'), null);
 });
 
 test('releases the response body reader after buffering', async () => {

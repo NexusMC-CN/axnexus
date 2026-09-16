@@ -3,6 +3,12 @@ type CacheEntry = {
   value: unknown;
 };
 
+/** Fallback entry cap for caches constructed without an explicit bound. */
+const DEFAULT_MAX_ENTRIES = 512;
+
+/** Cache entries above this size are not retained; re-fetching beats pinning them. */
+const MAX_ENTRY_BYTES = 1_000_000;
+
 /** Per-caller controls for waiting on a cache hit or shared load. */
 export interface CacheWaitOptions {
   /** Cancel this caller's wait without canceling the shared loader. */
@@ -91,14 +97,61 @@ function waitFor<T>(promise: Promise<T>, options: CacheWaitOptions | undefined):
   });
 }
 
+export interface GetRequestCacheOptions {
+  /** Maximum number of retained responses. Defaults to 512. */
+  maxEntries?: number;
+}
+
 export class GetRequestCache {
   readonly instanceId: string;
   private readonly responseCache = new Map<string, CacheEntry>();
   private readonly inflightRequests = new Map<string, Promise<unknown>>();
+  private readonly maxEntries: number;
   private generation = 0;
 
-  constructor(instanceId: string) {
+  constructor(instanceId: string, options: GetRequestCacheOptions = {}) {
     this.instanceId = instanceId;
+    const requested = Number(options.maxEntries ?? DEFAULT_MAX_ENTRIES);
+    this.maxEntries = Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : DEFAULT_MAX_ENTRIES;
+  }
+
+  /** Current number of retained (possibly expired) responses. */
+  size(): number {
+    return this.responseCache.size;
+  }
+
+  /**
+   * Drop every expired entry. Entries are otherwise only removed when the same
+   * key is requested again, so a long-lived client walking distinct URLs would
+   * keep every expired payload alive.
+   */
+  prune(now = Date.now()): number {
+    let removed = 0;
+    for (const [key, entry] of this.responseCache) {
+      if (entry.expiresAt <= now) {
+        this.responseCache.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  private store(key: string, entry: CacheEntry): void {
+    // Refresh insertion order so the oldest touched key is evicted first.
+    this.responseCache.delete(key);
+    this.responseCache.set(key, entry);
+    if (this.responseCache.size <= this.maxEntries) return;
+    // Prefer evicting already-expired entries before live ones.
+    const now = Date.now();
+    for (const [candidate, value] of this.responseCache) {
+      if (this.responseCache.size <= this.maxEntries) return;
+      if (value.expiresAt <= now) this.responseCache.delete(candidate);
+    }
+    while (this.responseCache.size > this.maxEntries) {
+      const oldest = this.responseCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.responseCache.delete(oldest);
+    }
   }
 
   async getOrLoad<T>(
@@ -121,10 +174,13 @@ export class GetRequestCache {
 
     const pending = loader().then((value) => {
       if (ttlMs > 0 && generation === this.generation) {
-        this.responseCache.set(key, {
-          expiresAt: Date.now() + ttlMs,
-          value: cloneValue(value),
-        });
+        const stored = cloneValue(value);
+        if (estimateBytes(stored) <= MAX_ENTRY_BYTES) {
+          this.store(key, {
+            expiresAt: Date.now() + ttlMs,
+            value: stored,
+          });
+        }
       }
       return cloneValue(value);
     });
@@ -134,6 +190,9 @@ export class GetRequestCache {
     pending.then(
       () => {
         if (this.inflightRequests.get(key) === pending) this.inflightRequests.delete(key);
+        // Opportunistically reclaim expired payloads so the map cannot grow
+        // without bound when callers keep requesting new URLs.
+        if (this.responseCache.size > this.maxEntries) this.prune();
       },
       () => {
         if (this.inflightRequests.get(key) === pending) this.inflightRequests.delete(key);
@@ -148,3 +207,14 @@ export class GetRequestCache {
     this.inflightRequests.clear();
   }
 }
+
+/** Cheap upper-bound estimate used to avoid pinning very large payloads. */
+function estimateBytes(value: unknown): number {
+  if (value === null || value === undefined || typeof value !== 'object') return 0;
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
+}
+

@@ -30,6 +30,7 @@ export class ProgressTracker {
   private lastLoaded = 0;
   private lastReportedAt = -Infinity;
   private lastRate: number | undefined;
+  private completed = false;
 
   get loaded(): number {
     return this.lastLoaded;
@@ -47,6 +48,10 @@ export class ProgressTracker {
   update(loaded: number, timestamp = (this.options.now ?? Date.now)()): TransferProgress | undefined {
     if (this.options.signal?.aborted) return undefined;
     const safeLoaded = Math.max(this.lastLoaded, Number(loaded) || 0);
+    // A throttled update still advances `lastLoaded`. When the byte count did
+    // not change afterwards, `complete()` must still be able to publish the
+    // final value, so an unchanged value only short-circuits while the transfer
+    // is still running.
     if (safeLoaded === this.lastLoaded && this.lastReportedAt !== -Infinity) return undefined;
     this.lastLoaded = safeLoaded;
     const elapsed = Math.max(0, timestamp - this.startedAt) / 1000;
@@ -63,8 +68,36 @@ export class ProgressTracker {
 
   complete(timestamp = (this.options.now ?? Date.now)()): TransferProgress | undefined {
     if (this.options.signal?.aborted) return undefined;
+    if (this.completed) return undefined;
+    this.completed = true;
     const total = Number.isFinite(this.options.total) ? Math.max(0, this.options.total as number) : undefined;
-    return this.update(total === undefined ? this.lastLoaded : total, timestamp);
+    const finalLoaded = total === undefined ? this.lastLoaded : total;
+    if (finalLoaded < this.lastLoaded) {
+      // A known total smaller than what was observed would regress the counter.
+      return undefined;
+    }
+    // Publish the final byte count unless it was already reported as the last
+    // event. A throttled update still advances `lastLoaded`, so without the
+    // explicit final emit the last event under-reports the transferred bytes.
+    if (this.lastReportedAt !== -Infinity && finalLoaded === this.lastLoadedBeforeReport) return undefined;
+    return this.emitFinal(finalLoaded, timestamp);
+  }
+
+  /**
+   * Emit the terminal progress event unconditionally. A throttled update may
+   * have already recorded the final count, which would otherwise make the
+   * "value unchanged" fast path swallow the last event.
+   */
+  private emitFinal(loaded: number, timestamp: number): TransferProgress {
+    this.lastLoaded = Math.max(this.lastLoaded, loaded);
+    const elapsed = Math.max(0, timestamp - this.startedAt) / 1000;
+    const deltaTime = Math.max(0, timestamp - this.lastReportedAt) / 1000;
+    if (this.lastReportedAt !== -Infinity && deltaTime > 0) {
+      this.lastRate = (this.lastLoaded - this.lastLoadedBeforeReport) / deltaTime;
+    }
+    this.lastReportedAt = timestamp;
+    this.lastLoadedBeforeReport = this.lastLoaded;
+    return this.emit(this.lastLoaded, elapsed);
   }
 
   private emit(loaded: number, elapsed: number): TransferProgress {
@@ -141,11 +174,22 @@ export function trackReadableStream(
   const tracker = new ProgressTracker({ ...options, signal });
   const reader = stream.getReader();
   let closed = false;
+  // Cancelling the wrapper must also abort an in-flight byte-throttle wait and
+  // any read still pending on the source, not just flag the stream.
+  const cancelController = new AbortController();
+  const innerSignal = combineWithAbort(signal, cancelController.signal);
+  const releaseAll = () => {
+    if (!cancelController.signal.aborted) cancelController.abort(abortReason(innerSignal));
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (closed) return;
       try {
-        const result = await readChunk(reader, signal);
+        const result = await readChunk(reader, innerSignal);
+        // `cancel()` may have run while this read was pending; the source
+        // closing makes the read resolve with `done: true`, which must not be
+        // reported as a completed transfer.
+        if (closed) return;
         if (result.done) {
           closed = true;
           tracker.complete();
@@ -154,14 +198,20 @@ export function trackReadableStream(
           if (options.rateLimiter) {
             await options.rateLimiter.consume(result.value.byteLength, {
               ...options.rateLimit,
-              signal,
+              signal: innerSignal,
             });
           }
-          if (signal?.aborted) throw abortReason(signal);
-          tracker.update(tracker.loaded + result.value.byteLength);
+          // Re-check after the throttle wait: the consumer may have canceled
+          // while we were waiting for byte quota.
+          if (closed) return;
+          if (innerSignal?.aborted) throw abortReason(innerSignal);
+          const updated = tracker.update(tracker.loaded + result.value.byteLength);
+          if (closed) return;
+          void updated;
           controller.enqueue(result.value);
         }
       } catch (error) {
+        if (closed) return;
         closed = true;
         // Cancellation is best-effort; a user-provided source may leave its
         // cancel promise pending. The consumer must still observe the error.
@@ -170,8 +220,25 @@ export function trackReadableStream(
       }
     },
     cancel(reason) {
+      if (closed) return undefined;
       closed = true;
+      // Abort the internal throttle wait so it does not keep a timer and keep
+      // consuming this resource group's byte quota after cancellation.
+      releaseAll();
       return reader.cancel(reason);
     },
   });
+}
+
+/** Combine an outer signal with an internal cancel signal. */
+function combineWithAbort(outer: AbortSignal | undefined, inner: AbortSignal): AbortSignal {
+  if (!outer) return inner;
+  if (outer.aborted) return outer;
+  const controller = new AbortController();
+  const onOuterAbort = () => controller.abort(abortReason(outer));
+  const onInnerAbort = () => controller.abort(inner.reason);
+  outer.addEventListener('abort', onOuterAbort, { once: true });
+  inner.addEventListener('abort', onInnerAbort, { once: true });
+  if (outer.aborted) onOuterAbort();
+  return controller.signal;
 }

@@ -16,7 +16,9 @@ test('supports Axios-style request overloads and standard method helpers', async
   });
 
   assert.deepEqual(await client.request<{ ok: boolean }>('/request-overload', { bypassCache: true }), { ok: true });
-  assert.deepEqual(await client.head<{ ok: boolean }>('/head', { bypassCache: true }), { ok: true });
+  // HEAD carries no payload, so its result is null even when the adapter
+  // returns a body-like Response for the probe.
+  assert.equal(await client.head<{ ok: boolean }>('/head', { bypassCache: true }), null);
   assert.deepEqual(await client.options<{ ok: boolean }>('/options', { bypassCache: true }), { ok: true });
   assert.deepEqual(await client.trace<{ ok: boolean }>('/trace', { bypassCache: true }), { ok: true });
   assert.deepEqual(await client.connect<{ ok: boolean }>('/connect', { bypassCache: true }), { ok: true });

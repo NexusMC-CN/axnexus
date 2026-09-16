@@ -99,6 +99,20 @@ async function rejectsWithin<T>(promise: Promise<T>, timeout = 250): Promise<unk
   }
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeout = 250): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('operation hung')), timeout);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 class MockSession extends EventEmitter {
   streams: MockStream[] = [];
   request(headers: Record<string, string>) {
@@ -226,7 +240,7 @@ test('fails in-flight streams when the shared session closes before response hea
   assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
 });
 
-test('keeps a pending request body attached after an early bodyless response', async () => {
+test('returns an early bodyless response without waiting for a stalled upload', async () => {
   const session = new ManualSession();
   const adapter = createNodeHttp2Adapter({
     module: {
@@ -247,10 +261,16 @@ test('keeps a pending request body attached after an early bodyless response', a
   await new Promise<void>((resolve) => setImmediate(resolve));
   session.streams[0].emit('response', { ':status': 204 });
   await new Promise<void>((resolve) => setImmediate(resolve));
-  session.emit('close');
 
-  const error = await rejectsWithin(pending);
-  assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
+  // The server answered in full before the upload finished; the caller must
+  // receive that status instead of waiting for a body source that never ends.
+  const result = await withTimeout(pending);
+  assert.equal(result.response.status, 204);
+
+  // A later session failure must not turn the completed response into an error.
+  session.emit('close');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(result.response.status, 204);
 });
 
 test('aborts a pending request body when the shared session errors after an early bodyless response', async () => {
@@ -261,8 +281,10 @@ test('aborts a pending request body when the shared session errors after an earl
       constants: { NGHTTP2_CANCEL: 8 },
     },
   });
+  let canceled: unknown;
   const body = new ReadableStream<Uint8Array>({
     pull: () => new Promise<void>(() => undefined),
+    cancel: (reason) => { canceled = reason; },
   });
 
   const pending = adapter({
@@ -274,10 +296,15 @@ test('aborts a pending request body when the shared session errors after an earl
   await new Promise<void>((resolve) => setImmediate(resolve));
   session.streams[0].emit('response', { ':status': 204 });
   await new Promise<void>((resolve) => setImmediate(resolve));
-  session.emit('error', new Error('session failed'));
 
-  const error = await rejectsWithin(pending);
-  assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
+  const result = await withTimeout(pending);
+  assert.equal(result.response.status, 204);
+
+  // The response is complete, so the upload source must be released rather
+  // than left open for a request that can no longer be sent.
+  session.emit('error', new Error('session failed'));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.notEqual(canceled, undefined);
 });
 
 test('http2 adapter removes abort side effects after response body completes', async () => {

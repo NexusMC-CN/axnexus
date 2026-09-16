@@ -94,7 +94,7 @@ test('fetch adapter reports a clear error when fetch is unavailable', async () =
   }
 });
 
-test('fetch adapter enables duplex only for Node readable stream uploads', async () => {
+test('fetch adapter always enables duplex for readable stream uploads', async () => {
   const originalFetch = globalThis.fetch;
   let seenInit: RequestInit | undefined;
   const adapter = createFetchAdapter(async (_input, init) => {
@@ -111,7 +111,9 @@ test('fetch adapter enables duplex only for Node readable stream uploads', async
     await adapter({
       url: 'https://example.test', method: 'POST', headers: new Headers(), body,
     } as never);
-    assert.equal((seenInit as RequestInit & { duplex?: string } | undefined)?.duplex, isBunRuntime ? undefined : 'half');
+    // The Fetch standard requires `duplex: 'half'` for a stream body in every
+    // environment; omitting it makes a spec-compliant implementation throw.
+    assert.equal((seenInit as RequestInit & { duplex?: string } | undefined)?.duplex, 'half');
   } finally {
     globalThis.fetch = originalFetch;
   }

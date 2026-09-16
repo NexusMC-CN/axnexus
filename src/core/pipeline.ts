@@ -12,7 +12,7 @@ import {
   normalizeRetry,
   normalizeTimeout,
 } from './config.js';
-import { combineSignals, raceWithSignal, sleep, TIMEOUT_REASON } from './control.js';
+import { combineSignals, raceWithSignal, signalReason, sleep, TIMEOUT_REASON } from './control.js';
 import { HttpError, toError } from './errors.js';
 import {
   calculateRetryDelay,
@@ -35,6 +35,8 @@ export interface RequestPipelineDeps {
   responseInterceptors: InterceptorManager<HttpResponse<unknown>>;
   cache: GetRequestCache;
   rateLimiter: RateLimiter;
+  /** Releases adapter-owned transport resources created for this request. */
+  releaseAdapterStream?: () => void;
 }
 
 export async function runRequestPipeline<T>(
@@ -49,6 +51,7 @@ export async function runRequestPipeline<T>(
     responseInterceptors,
     cache,
     rateLimiter,
+    releaseAdapterStream,
   } = deps;
   let resolved: ResolvedRequestConfig | undefined;
   let interceptedConfig: RequestConfig | undefined;
@@ -75,6 +78,10 @@ export async function runRequestPipeline<T>(
     }
   };
   try {
+    // Do not start the interceptor chain for a request that is already
+    // canceled: scheduling user callbacks after the caller has received a
+    // cancellation error would run side effects they no longer expect.
+    if (setupSignals.signal?.aborted) throw signalReason(setupSignals.signal);
     const initialMethod = String(input.method || 'GET').toUpperCase();
     const initialHeaders = mergeAxiosHeaders(defaults.headers, input.headers, initialMethod);
     const initialRequestIdPresent = initialHeaders.has('X-Request-Id');
@@ -144,6 +151,11 @@ export async function runRequestPipeline<T>(
       initialResolved.signal,
       initialResolved.rateLimit?.signal,
       totalController?.signal,
+      // Keep the outer setup signals (client default, caller, initial rateLimit)
+      // connected for the whole request. Otherwise a caller that cancels after
+      // request preparation finished but before the adapter settles would no
+      // longer be able to stop the request.
+      setupSignals.signal,
     ]);
     let totalTimeoutTriggered = false;
     const totalTimer = totalController
@@ -156,6 +168,10 @@ export async function runRequestPipeline<T>(
       let lastError: HttpError | undefined;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         if (attempt > 0) {
+          // Retry preparation and hooks run OUTSIDE the rate limiter's
+          // concurrency slot. Holding the slot while awaiting a hook that
+          // itself calls this client (for example a token refresh) deadlocks
+          // when `maxConcurrent` is 1: the nested request could never start.
           const retrySignals = combineSignals([
             overallSignal.signal,
             interceptedConfig?.signal,
@@ -208,7 +224,10 @@ export async function runRequestPipeline<T>(
         ]);
         try {
           try {
-            return await executeAttempt({
+            // Every attempt — including retries — passes back through the rate
+            // limiter. Reserving the slot once for the whole retry loop would
+            // let automatic retries exceed `requestsPerInterval`.
+            return await rateLimiter.run((releaseSlot) => executeAttempt({
               adapter,
               config: attemptResolved,
               defaults,
@@ -220,6 +239,13 @@ export async function runRequestPipeline<T>(
               totalTimeoutEnabled: Boolean(totalController),
               totalTimeoutTriggered: () => totalTimeoutTriggered,
               rateLimiter,
+              // Release the concurrency slot before response interceptors run:
+              // they may await a nested request on this same client, which
+              // would otherwise never be able to start.
+              onAdapterSettled: releaseSlot,
+            }), {
+              ...(attemptResolved.rateLimit ?? {}),
+              signal: attemptSignals.signal,
             });
           } catch (error) {
             const normalized = error instanceof HttpError
@@ -275,19 +301,24 @@ export async function runRequestPipeline<T>(
       generatedRequestId: generatedRequestIdForCache,
       requestInterceptorCount: requestInterceptors.getHandlers().length,
       responseInterceptorCount: responseInterceptors.getHandlers().length,
+      defaultRetry: defaults.retry,
     });
-    const runScheduled = () => rateLimiter.run(perform, {
-      ...(initialResolved.rateLimit ?? {}),
-      signal: overallSignal.signal,
-    });
+    // Scheduling now happens per attempt inside `perform`, so a retry cannot
+    // bypass `requestsPerInterval` by reusing the original reservation.
+    // A write request mutates server state as soon as the server responds, even
+    // if local response parsing/validation then fails. Cache invalidation must
+    // therefore be driven by the method, not by the whole request succeeding.
+    const invalidatesCache = initialResolved.method !== 'GET';
     try {
       const result = cachePolicy.enabled
-        ? await cache.getOrLoad(cachePolicy.key!, cachePolicy.ttl, async () => (await runScheduled()).data)
-        : await runScheduled();
-      if (initialResolved.method !== 'GET') cache.clear();
+        ? await cache.getOrLoad(cachePolicy.key!, cachePolicy.ttl, async () => (await perform()).data)
+        : await perform();
+      if (invalidatesCache) cache.clear();
       if (fullResponse) return result as HttpResponse<T>;
       return cachePolicy.enabled ? result as T : (result as HttpResponse<T>).data;
     } catch (error) {
+      // Mirror the success path: the server may already have applied the write.
+      if (invalidatesCache) cache.clear();
       if (totalTimeoutTriggered) {
         throw new HttpError('Request timed out', {
           code: 'ETIMEDOUT',
@@ -309,6 +340,10 @@ export async function runRequestPipeline<T>(
     } finally {
       if (totalTimer) clearTimeout(totalTimer);
       overallSignal.cleanup();
+      // Adapters that keep an internal cancellation listener must drop it once
+      // the pipeline is done; otherwise a long-lived caller signal accumulates
+      // listeners for every completed request.
+      releaseAdapterStream?.();
     }
   } catch (error) {
     let fallbackConfig = resolved;

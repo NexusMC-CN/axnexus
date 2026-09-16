@@ -41,6 +41,10 @@ export async function shouldRetry(
   if (typeof retry.shouldRetry === 'function') {
     return retry.shouldRetry({ error, retryCount, delay });
   }
+  // A local policy callback (validateStatus / throwHttpErrors) that threw is a
+  // programming/config error, not a transport failure. Retrying it only repeats
+  // the same local failure and can re-send an already-successful request.
+  if (error.code === 'ERR_INVALID_STATUS_POLICY') return false;
   const errorCodes = new Set(retry.errorCodes ?? []);
   const explicitlyAllowedErrorCode = errorCodes.has(error.code);
   if (error.retryable === false && !explicitlyAllowedErrorCode) return false;
@@ -49,6 +53,9 @@ export async function shouldRetry(
     ? methods.has(config.method)
     : IDEMPOTENT_METHODS.has(config.method) || Boolean(config.retryUnsafeMethods);
   if (!methodAllowed) return false;
+  // An explicit `errorCodes` list is a whitelist: transport-level defaults such
+  // as ERR_NETWORK/timeouts must match it instead of retrying unconditionally.
+  if (errorCodes.size > 0 && !explicitlyAllowedErrorCode) return false;
   const defaultDecision = error.isTimeout || error.code === 'ERR_NETWORK'
     ? true
     : error.code === 'ERR_BAD_RESPONSE' && error.status !== undefined

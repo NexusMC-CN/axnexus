@@ -113,6 +113,12 @@ function matchesName(matcher: HeaderMatcher | undefined, name: string): boolean 
 
 export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   private readonly values = new Map<string, { name: string; value: HeaderValue }>();
+  /**
+   * Names explicitly deleted through `delete()`/`clear()` or the `false`
+   * opt-out. A plain `Map.delete` is indistinguishable from "never set", which
+   * lets a later merge restore a default the caller removed.
+   */
+  private readonly removed = new Set<string>();
 
   static from<T extends HeaderInput | null | undefined>(headers?: T): T extends AxiosHeaders ? T : AxiosHeaders {
     if (headers instanceof AxiosHeaders) return headers as T extends AxiosHeaders ? T : AxiosHeaders;
@@ -134,7 +140,12 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   constructor(headers?: HeaderInput | null) {
     if (!headers) return;
     if (headers instanceof AxiosHeaders) {
-      for (const [name, value] of headers) this.set(name, value);
+      // Preserve list-valued fields and the `false` opt-out sentinel; tracking
+      // removals separately keeps `deleted` distinguishable from `never set`.
+      for (const [name, value] of headers) this.append(name, value);
+      for (const name of headers.removedNames()) {
+        if (!this.values.has(normalizeName(name))) this.removed.add(normalizeName(name));
+      }
       return;
     }
     if (typeof headers === 'string') {
@@ -147,7 +158,7 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
     if (isHeaderIterable(headers)) {
       for (const pair of headers) {
         if (!pair || pair.length < 2) continue;
-        this.set(String(pair[0]), pair[1]);
+        this.append(String(pair[0]), pair[1]);
       }
     } else {
       for (const [name, value] of Object.entries(headers)) {
@@ -163,16 +174,26 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   set(name: string, value: HeaderValue, rewrite?: HeaderRewrite): this;
   set(headers: HeaderInput, rewrite?: HeaderRewrite): this;
   set(nameOrHeaders: HeaderInput, valueOrRewrite?: HeaderValue | HeaderRewrite, rewrite?: HeaderRewrite): this {
-    if (typeof nameOrHeaders === 'string' && valueOrRewrite === undefined && nameOrHeaders.includes(':')) {
+    // A raw header block is recognized whether or not a rewrite argument is
+    // present; previously `set('X-Trace: next', true)` treated the whole string
+    // as a header name and threw ERR_INVALID_HEADER.
+    if (typeof nameOrHeaders === 'string' && typeof valueOrRewrite !== 'function'
+      && nameOrHeaders.includes(':')) {
+      const effectiveRewrite = rewrite ?? (valueOrRewrite as HeaderRewrite | undefined);
       for (const line of nameOrHeaders.split(/\r?\n/)) {
         const separator = line.indexOf(':');
-        if (separator > 0) this.set(line.slice(0, separator), line.slice(separator + 1).trim(), rewrite);
+        if (separator > 0) this.set(line.slice(0, separator), line.slice(separator + 1).trim(), effectiveRewrite);
       }
       return this;
     }
     if (typeof nameOrHeaders !== 'string') {
       const target = new AxiosHeaders(nameOrHeaders);
       for (const [name, value] of target) this.set(name, value, valueOrRewrite as HeaderRewrite);
+      // Propagate explicit removals so a merge from a source that recorded a
+      // deletion cannot let an earlier default survive.
+      for (const name of target.removedNames()) {
+        if (!this.values.has(name)) this.delete(name);
+      }
       return this;
     }
     const name = normalizeName(nameOrHeaders);
@@ -186,10 +207,50 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
     if (existing && !shouldRewrite) return this;
     if (value === undefined || value === null) {
       this.values.delete(name);
+      this.removed.add(name);
       return this;
+    }
+    if (value === false) {
+      // `false` is the explicit opt-out sentinel: remember it so a later merge
+      // cannot silently restore the default value.
+      this.removed.add(name);
+    } else {
+      this.removed.delete(name);
     }
     this.values.set(name, { name: existing?.name ?? name, value });
     return this;
+  }
+
+  /**
+   * Append a value to an existing header, mirroring `Headers.append`. Used for
+   * list-valued fields such as `Set-Cookie`, where `set` would overwrite the
+   * previous occurrence.
+   */
+  append(name: string, value: HeaderValue): this {
+    if (value === undefined || value === null) return this;
+    const key = normalizeName(name);
+    // A `false` sentinel is an explicit opt-out, not a value to concatenate.
+    if (value === false) return this.set(name, false);
+    const normalized = normalizeValue(value, key);
+    const existing = this.values.get(key);
+    if (existing && existing.value !== false) {
+      const combined = (Array.isArray(existing.value) ? existing.value : [existing.value])
+        .concat(Array.isArray(normalized) ? normalized : [normalized as HeaderScalar]) as HeaderScalar[];
+      this.values.set(key, { name: existing.name, value: combined });
+      this.removed.delete(key);
+      return this;
+    }
+    return this.set(name, value);
+  }
+
+  /** Header names explicitly removed on this instance. */
+  removedNames(): string[] {
+    return [...this.removed];
+  }
+
+  /** True when this instance recorded an explicit removal for `name`. */
+  wasRemoved(name: string): boolean {
+    return this.removed.has(normalizeName(name));
   }
 
   get(name: string): string | undefined;
@@ -231,6 +292,12 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
       const entry = this.values.get(key);
       if (entry && matches(matcher, Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value), entry.name)) {
         deleted = this.values.delete(key) || deleted;
+        this.removed.add(key);
+      } else if (!entry && !matcher) {
+        // Record the intent even when nothing was present yet, so merging a
+        // default afterwards does not resurrect the header.
+        this.removed.add(key);
+        deleted = true;
       }
     }
     return deleted;
@@ -241,6 +308,7 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
     for (const [key, entry] of this.values) {
       if (matchesName(matcher, entry.name)) {
         this.values.delete(key);
+        this.removed.add(key);
         changed = true;
       }
     }
@@ -271,7 +339,6 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
       callback.call(thisArg, normalized, name, this);
     }
   }
-
   toJSON(asStrings = false): Record<string, string | string[]> {
     const result: Record<string, string | string[]> = {};
     for (const entry of this.values.values()) {

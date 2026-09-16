@@ -21,10 +21,13 @@ export function serializeParams(params: Readonly<QueryParams> | undefined): stri
 export function resolveURL(baseURL = '', path = '', allowAbsoluteURL = true): string {
   const base = String(baseURL || '').trim().replace(/\/+$/, '');
   const target = String(path || '').trim();
-  const isAbsolute = /^(?:https?:)?\/\//i.test(target);
+  // URL parsers treat a backslash as a path separator, so `/\host/path` is a
+  // network-path reference in browsers. Recognizing only `//` would let that
+  // form bypass `allowAbsoluteURL: false` and reach another origin.
+  const isAbsolute = /^(?:[a-z][a-z\d+.-]*:)?[\\/]{2}/i.test(target);
   if (isAbsolute) {
     if (!allowAbsoluteURL) throw new TypeError('Absolute URLs are disabled for this client');
-    if (/^\/\//.test(target)) return `https:${target}`;
+    if (/^[\\/]{2}/.test(target)) return `https:${target.replace(/\\/g, '/')}`;
     return target;
   }
   if (/^[a-z][a-z\d+.-]*:/i.test(target)) {

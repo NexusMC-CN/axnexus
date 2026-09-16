@@ -160,42 +160,51 @@ export async function uploadChunks<T>(source: Uint8Array, options: ChunkUploadOp
       const part: ChunkUploadPart = { index, start, end, body, total, signal: options.signal };
       let attempt = 0;
 
-      while (true) {
-        if (isAborted(options.signal)) throw abortError();
-        if (failed) return;
-        attempt += 1;
-
-        try {
-          const result = await raceWithSignal(options.upload(part), options.signal);
-          // Cancellation wins over a late upload resolution. Do not publish
-          // a completed result or progress event after the orchestration
-          // signal has already been aborted.
-          if (isAborted(options.signal)) throw abortError();
-          results[index] = result;
-        } catch (error) {
-          // Cancellation is a control signal, not a transient part failure.
-          if (isAborted(options.signal)) throw abortError();
-
-          await raceWithSignal(options.onPartError?.({ part, error, attempt, signal: options.signal }), options.signal);
+      try {
+        while (true) {
           if (isAborted(options.signal)) throw abortError();
           if (failed) return;
+          attempt += 1;
 
-          if (attempt > maxRetries) {
-            failed = true;
-            throw error;
+          try {
+            const result = await raceWithSignal(options.upload(part), options.signal);
+            // Cancellation wins over a late upload resolution. Do not publish
+            // a completed result or progress event after the orchestration
+            // signal has already been aborted.
+            if (isAborted(options.signal)) throw abortError();
+            results[index] = result;
+          } catch (error) {
+            // Cancellation is a control signal, not a transient part failure.
+            if (isAborted(options.signal)) throw abortError();
+
+            await raceWithSignal(options.onPartError?.({ part, error, attempt, signal: options.signal }), options.signal);
+            if (isAborted(options.signal)) throw abortError();
+            if (failed) return;
+
+            if (attempt > maxRetries) {
+              failed = true;
+              throw error;
+            }
+
+            const delay = await raceWithSignal(resolveRetryDelay(options.retryDelay, attempt, error, part), options.signal);
+            await waitForRetry(delay, options.signal);
+            continue;
           }
 
-          const delay = await raceWithSignal(resolveRetryDelay(options.retryDelay, attempt, error, part), options.signal);
-          await waitForRetry(delay, options.signal);
-          continue;
+          // Progress is reported only after a successful upload. Errors from the
+          // observer itself are intentionally allowed to propagate, rather than
+          // being treated as another upload attempt.
+          loaded += body.byteLength;
+          options.onProgress?.(loaded, total);
+          break;
         }
-
-        // Progress is reported only after a successful upload. Errors from the
-        // observer itself are intentionally allowed to propagate, rather than
-        // being treated as another upload attempt.
-        loaded += body.byteLength;
-        options.onProgress?.(loaded, total);
-        break;
+      } catch (error) {
+        // Any escape from the per-part loop — a hook that threw, a failed
+        // retry-delay resolver, or the final upload failure — must stop the
+        // other workers. Otherwise they keep claiming and uploading parts for
+        // a transfer whose promise already rejected.
+        failed = true;
+        throw error;
       }
     }
   };

@@ -3,7 +3,7 @@ import { HttpError } from '../core/errors.js';
 import { validateStandardSchema } from '../core/schema.js';
 import { AxiosHeaders, type HeaderInput } from '../headers/headers.js';
 import { combineSignals } from '../utils/signal.js';
-import { readResponse } from '../utils/response.js';
+import { cancelBody, readResponse } from '../utils/response.js';
 
 export interface FetchJsonOptions extends Omit<RequestInit, 'headers'> {
   headers?: HeaderInput;
@@ -24,10 +24,13 @@ export interface FetchJsonResult<T = unknown> {
 }
 
 function buildHeaders(headers: HeaderInput | undefined, cookie: string | undefined): Headers {
-  const result = AxiosHeaders.from(headers).toHeaders();
-  if (!result.has('Accept')) result.set('Accept', 'application/json');
-  if (cookie && !result.has('Cookie')) result.set('Cookie', cookie);
-  return result;
+  const store = AxiosHeaders.from(headers);
+  // Honour the `false` opt-out the client uses before falling back to defaults:
+  // converting to native Headers first would erase the sentinel and let the
+  // default value (or the injected cookie) resurrect a disabled header.
+  if (!store.has('Accept') && !store.isDisabled('Accept')) store.set('Accept', 'application/json');
+  if (cookie && !store.has('Cookie') && !store.isDisabled('Cookie')) store.set('Cookie', cookie);
+  return store.toHeaders();
 }
 
 export async function fetchJsonResult<T = unknown>(url: string | URL, options: FetchJsonOptions = {}): Promise<FetchJsonResult<T>> {
@@ -57,13 +60,24 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
       signal: combined.signal,
       headers: buildHeaders(headers, cookie),
     });
-    if (!response.ok || response.status === 204 || response.headers.get('content-length') === '0') {
+    const bodylessStatus = response.status === 204 || response.status === 205 || response.status === 304;
+    const noBody = bodylessStatus
+      || String(init.method ?? 'GET').toUpperCase() === 'HEAD'
+      || response.headers.get('content-length') === '0';
+    if (!response.ok || noBody) {
+      // `fetchJson` discards the Response it cannot use, so this path must
+      // release the body itself. An unread body holds a connection open in
+      // Node/Undici and can exhaust the connection pool.
+      cancelBody(response);
       return { data: null, status: response.status, response };
     }
-    let data = await readResponse(response, 'json', maxBodySize, parseJson, combined.signal) as T | null;
-    if (data !== null && schema) {
+    const payload = await readResponse(response, 'json', maxBodySize, parseJson, combined.signal) as T | null | undefined;
+    // `undefined` is an absent payload; an explicit JSON `null` is a value and
+    // must still be validated.
+    let data = (payload === undefined ? null : payload) as T | null;
+    if (schema && payload !== undefined) {
       try {
-        data = await validateStandardSchema(data, schema) as T;
+        data = await validateStandardSchema(payload, schema) as T;
       } catch (cause) {
         throw new HttpError('Response schema validation failed', {
           code: 'ERR_SCHEMA_VALIDATION',

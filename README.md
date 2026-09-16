@@ -101,9 +101,11 @@ const result = await http.get('/jobs/123', {
 
 `timeout` 限制单次 adapter 尝试（也覆盖该次响应体读取），`totalTimeout` 从进入限速队列前开始计时，覆盖排队、响应体读取、重试等待和所有尝试。单次 `timeout` 与外部取消同时发生时，以先触发者为准；外部 `AbortSignal` 在总超时触发前取消时返回 `ERR_CANCELED`，总超时计时器已经触发时统一返回 `ETIMEDOUT`。带 `signal`、`timeout` 或 `totalTimeout` 的请求不会进入客户端 data cache，因此每个调用方的取消和截止时间都独立生效。
 
-响应处理规则是固定的：`204`、`Content-Length: 0`、空字节以及只有空白字符的文本都返回 `null`；`responseType: 'text'` 保留非空文本原样，`blob` 和 `arrayBuffer` 返回对应二进制值。JSON（包括自定义 `parseJson`）解析失败会抛出 `ERR_BAD_PAYLOAD`，`transformResponse` 失败会抛出 `ERR_TRANSFORM_RESPONSE`，不会伪装成网络错误。错误状态的 payload 使用文本读取后尝试 JSON 解析，超过 `maxBodySize` 时 payload 置为 `null`，HTTP 错误本身仍保留状态码。
+响应处理规则是固定的：`204`、`205`、`304`、`HEAD`、`Content-Length: 0`、空字节以及只有空白字符的文本都返回 `null`。**响应体确实是 JSON `null` 时仍会执行 `schema` 校验**，因此「没有响应体」和「响应体是 `null`」不会被混为一谈；同理，校验器返回带 `issues` 的失败结果（即使 `issues` 为空数组）一律视为校验失败。`responseType: 'text'` 保留非空文本原样，`blob` 返回带响应 `Content-Type` 的 Blob，`arrayBuffer` 返回对应二进制值。HEAD 的 `Content-Length` 描述的是对应 GET 资源的大小，既不会按实际响应体执行 `maxBodySize` 校验，也不会上报为已下载字节。JSON（包括自定义 `parseJson`）解析失败会抛出 `ERR_BAD_PAYLOAD`，`transformResponse` 失败会抛出 `ERR_TRANSFORM_RESPONSE`，不会伪装成网络错误。错误状态的 payload 使用文本读取后尝试 JSON 解析，超过 `maxBodySize` 时 payload 置为 `null`，HTTP 错误本身仍保留状态码；被丢弃或未读完的响应体会被主动取消以释放连接。
 
-`maxBodySize` 会先检查响应的 `Content-Length`；可读流按块累计，超过上限会立即停止读取并取消 reader；没有可读流的响应只能在运行时完成缓冲后检查大小。`transformRequest` 和 `stringifyJson` 可用于接入自定义序列化协议，任一请求转换或序列化钩子失败都会抛出 `ERR_TRANSFORM_REQUEST`。
+`validateStatus` 或 `throwHttpErrors` 回调自身抛错时返回 `ERR_INVALID_STATUS_POLICY`，并且不会当作可重试的网络错误重发请求。
+
+`maxBodySize` 会先检查响应的 `Content-Length`（HEAD 与 `204`/`205`/`304` 除外，它们本身没有响应体）；可读流按块累计，超过上限会立即停止读取、取消 reader 并取消底层响应体；没有可读流的响应只能在运行时完成缓冲后检查大小。`transformRequest` 和 `stringifyJson` 可用于接入自定义序列化协议，任一请求转换或序列化钩子失败都会抛出 `ERR_TRANSFORM_REQUEST`。
 
 ## FormData
 
@@ -292,9 +294,15 @@ const parts = await pending;
 
 ### HTTP/2 session 与 stream
 
-Node HTTP/2 adapter 按 origin 复用 session，但每个请求仍有独立 stream。单个 stream 的错误、abort、请求取消或超时只关闭该 stream；正常情况下不会因为一个请求失败而主动关闭共享 session。session 自身发生 `error` 或 `close` 时会广播网络错误结束该 session 上的活动 stream，并从复用表移除，后续请求会建立新 session；调用方仍应分别处理每个请求的错误。
+Node HTTP/2 adapter 按 origin 复用 session，但每个请求仍有独立 stream。单个 stream 的错误、abort、请求取消或超时只关闭该 stream；正常情况下不会因为一个请求失败而主动关闭共享 session。session 自身发生 `error` 或 `close` 时会广播网络错误结束该 session 上的活动 stream，并从复用表移除，后续请求会建立新 session。收到 `GOAWAY` 时会话同样立即退出复用池（即使已有 stream 仍在进行），这样新请求会改用新连接而不是持续失败。调用方仍应分别处理每个请求的错误。
 
-Node HTTP/2 的 `ReadableStream` 请求体在读取期间会响应取消；这类不可重放请求不会自动重试。HTTP/3 不共享这套 session，实现细节由注入的 QUIC transport 负责。
+空闲 session 会被 `unref()`，因此一次性脚本在读完响应后可以正常退出。仍然持有连接时，可以显式关闭：
+
+```typescript
+await client.close(); // 关闭 adapter 持有的传输资源（例如 HTTP/2 session）
+```
+
+Node HTTP/2 的 `ReadableStream` 请求体在读取期间会响应取消；这类不可重放请求不会自动重试。上传写入会等待 `drain`，下载在消费端跟不上时会暂停底层流，因此大文件传输不会无限堆积内存。HTTP/3 不共享这套 session，实现细节由注入的 QUIC transport 负责。
 
 ## 取消和超时
 
@@ -325,7 +333,11 @@ const created = await http.post('/jobs', payload, {
 
 网络错误和单次超时会遵循同一套重试次数配置，取消不会重试。请求级 `retry` 对象会继承客户端级对象，只有显式提供的字段会覆盖默认值；请求级数字只覆盖 `limit`，不会丢弃客户端的状态码、方法和退避设置。退避优先级为请求级 `retryDelay`、客户端级 `retryDelay`、`retry.delay`，数字延迟按第几个重试尝试线性累加，函数参数 `attempt` 从 `1` 开始；`shouldRetry` 和 `beforeRetry` 收到的 `RetryContext.delay` 是应用 `Retry-After`、`maxDelay` 和抖动后的最终值。`validateStatus` 优先于 `throwHttpErrors`；被 `validateStatus` 接受或被 `throwHttpErrors: false` 接受的状态不会生成 `ERR_BAD_RESPONSE`，也不会触发状态重试。
 
-状态码策略的优先级是请求级 `retryOn`、请求级 `retry.statusCodes`、客户端级 `retryOn`、客户端级 `retry.statusCodes`，最后才是内置默认值；建议同一层只使用一种写法。默认 `respectRetryAfter: true`：有效的 `Retry-After` 会覆盖本地退避，之后 `maxDelay` 仍是最终上限，抖动也不会突破它；设为 `false` 才会忽略服务端退避。`retry.errorCodes` 是非 HTTP 错误的显式白名单，会覆盖该错误默认的 `retryable: false`，但取消和不可重放的 `ReadableStream` 始终不会重试。
+状态码策略的优先级是请求级 `retryOn`、请求级 `retry.statusCodes`、客户端级 `retryOn`、客户端级 `retry.statusCodes`，最后才是内置默认值；建议同一层只使用一种写法。默认 `respectRetryAfter: true`：有效的 `Retry-After` 会覆盖本地退避，之后 `maxDelay` 仍是最终上限，抖动也不会突破它；设为 `false` 才会忽略服务端退避。
+
+`retry.errorCodes` 是一份**白名单**：一旦显式提供，只有其中的错误码会被重试，`ERR_NETWORK` 和超时也不会例外；未提供时 `ERR_NETWORK` 与超时按默认策略重试。该白名单同时会覆盖某个错误默认的 `retryable: false`。无论是否设置白名单，调用方取消和不可重放的 `ReadableStream` 请求体始终不会重试，`validateStatus`/`throwHttpErrors` 这类本地策略回调抛出的 `ERR_INVALID_STATUS_POLICY` 也不会重试。
+
+每次尝试（包括重试）都会重新经过限速排队，因此自动重试不会绕过 `requestsPerInterval`；重试钩子（`beforeRetry`）和响应拦截器在等待期间不占用 `maxConcurrent` 名额，可以在其中安全地通过同一客户端发起令牌刷新等请求。
 
 重试期间会复用同一个 `X-Request-Id`。`totalTimeout` 到期后不会进入下一次重试，即使还剩重试次数也会直接返回 `ETIMEDOUT`。
 
@@ -392,7 +404,9 @@ await cachedHttp.get('/catalog', { bypassCache: true });
 cachedHttp.clearCache();
 ```
 
-缓存只作用于 GET。请求 key 包含 method、最终 URL、规范化请求头（自动生成的 `X-Request-Id` 除外）、`responseType` 以及 `credentials`、`mode`、`redirect`、`referrer`、`referrerPolicy`、`integrity` 和 `keepalive` 等 Fetch 行为选项；因此不同响应类型不会互相污染。相同 key 的进行中请求会共享一次 adapter 调用，但带 `signal`、`timeout`、`totalTimeout`、`maxBodySize`、`onDownloadProgress`、`rateLimit`、自定义 `parseJson`、`transformResponse`、`validateStatus` 或 `throwHttpErrors` 的请求会主动跳过客户端 data cache，以保证调用方的截止时间、响应边界、进度事件和状态策略不被共享请求吞掉；注册了请求或响应拦截器的实例也会跳过该缓存，因为拦截器可能在重试时改变 URL、请求头或请求体。成功的非 GET 请求会清空当前实例缓存。缓存保存在内存中，不跨实例或持久化。
+缓存只作用于 GET。请求 key 包含 method、最终 URL、规范化请求头（自动生成的 `X-Request-Id` 除外）、`responseType` 以及 `credentials`、`mode`、`redirect`、`referrer`、`referrerPolicy`、`integrity` 和 `keepalive` 等 Fetch 行为选项；因此不同响应类型不会互相污染。相同 key 的进行中请求会共享一次 adapter 调用，但带 `signal`、`timeout`、`totalTimeout`、`maxBodySize`、`onDownloadProgress`、`rateLimit`、`schema`、自定义 `parseJson`、`transformResponse`、`validateStatus` 或 `throwHttpErrors` 的请求会主动跳过客户端 data cache，以保证调用方的截止时间、响应边界、进度事件、校验和状态策略不被共享请求吞掉；请求级 `retry` 与客户端默认不一致时也不会共享，避免把其他调用方的重试策略施加到本次请求；注册了请求或响应拦截器的实例同样会跳过该缓存，因为拦截器可能在重试时改变 URL、请求头或请求体。
+
+非 GET 请求只要被发出过就会清空当前实例缓存——即使响应解析或校验随后失败，因为服务端可能已经应用了这次写入。缓存保存在内存中，不跨实例或持久化；`GetRequestCache` 默认最多保留 512 条、单条超过约 1 MB 的结果不入缓存，并提供 `prune()` 主动回收过期条目。
 
 需要 stale-while-revalidate 或 stale-if-error 时直接使用 `ResponseCache`：
 

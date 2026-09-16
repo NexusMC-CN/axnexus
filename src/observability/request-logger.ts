@@ -51,7 +51,10 @@ export interface RequestLogger {
 function normalizeHeaders(headers: HeaderInput | undefined, redact: Set<string>): Record<string, string> {
   const output: Record<string, string> = {};
   AxiosHeaders.from(headers).forEach((value, name) => {
-    output[name] = redact.has(name) ? '[REDACTED]' : value;
+    // Header names are case-insensitive and `AxiosHeaders.normalize(true)` can
+    // re-case them to `Authorization`/`Cookie`; match on the lowercased name so
+    // a formatted instance cannot bypass redaction.
+    output[name] = redact.has(name.toLowerCase()) ? '[REDACTED]' : value;
   });
   return output;
 }

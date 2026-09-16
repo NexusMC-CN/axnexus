@@ -27,6 +27,12 @@ export function mergeMethodHeaders(
     && typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function';
   const applySource = (source: unknown) => {
     if (!source) return;
+    // Raw header strings are a supported `HeaderInput`; parse them instead of
+    // silently dropping a `'Authorization: ...'` block.
+    if (typeof source === 'string') {
+      result.set(source, rewrite);
+      return;
+    }
     if (source instanceof AxiosHeaders || (typeof Headers !== 'undefined' && source instanceof Headers) || isIterable(source)) {
       result.set(source as HeaderInput, rewrite);
       return;
@@ -50,6 +56,14 @@ export function mergeMethodHeaders(
       }
     }
     result.set(direct, rewrite);
+    // Replay explicit deletions last. `AxiosHeaders.set` drops undefined/null
+    // entries from the temporary store above, so a request-level
+    // `{ Authorization: null }` would otherwise leave the client default in
+    // place and still send credentials the caller asked to remove.
+    for (const [key, value] of Object.entries(record)) {
+      if (groupedNames.has(key.toLowerCase())) continue;
+      if (value === null || value === undefined || value === false) result.set(key, value as HeaderValue);
+    }
   };
   applySource(defaults);
   applySource(request);

@@ -3,7 +3,7 @@ import { RateLimiter } from '../transfer/rate-limiter.js';
 import { createInterceptorManager, createRequestInterceptorManager } from './interceptors.js';
 import { buildFetchAdapter, createRequestId } from './config.js';
 import { runRequestPipeline, type RequestPipelineDeps } from './pipeline.js';
-import type { HttpClient, HttpClientConfig, HttpResponse, RequestConfig } from './types.js';
+import type { HttpAdapter, HttpClient, HttpClientConfig, HttpResponse, RequestConfig } from './types.js';
 
 export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const defaults: HttpClientConfig = {
@@ -16,6 +16,9 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const responseInterceptors = createInterceptorManager<HttpResponse<unknown>>();
   const cache = new GetRequestCache(createRequestId());
   const rateLimiter = new RateLimiter(defaults.rateLimit ?? {});
+  // Adapters that manage long-lived transports (HTTP/2 sessions) can expose a
+  // per-request release hook so a completed request drops its abort listener.
+  const releaseAdapterStream = () => adapter.releaseStream?.();
   const pipelineDeps: RequestPipelineDeps = {
     defaults,
     adapter,
@@ -23,6 +26,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     responseInterceptors,
     cache,
     rateLimiter,
+    releaseAdapterStream,
   };
 
   const requestInternal = <T>(input: RequestConfig, fullResponse: boolean): Promise<T | HttpResponse<T>> =>
@@ -57,6 +61,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     delete: (url, config = {}) => request({ ...config, url, method: 'DELETE' }),
     deleteResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'DELETE' }),
     clearCache: () => cache.clear(),
+    close: () => adapter.closeTransport?.(),
     interceptors: {
       request: requestInterceptors,
       response: responseInterceptors,

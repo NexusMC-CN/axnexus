@@ -5,15 +5,22 @@ import type { AdapterConfig, AdapterResult, HttpAdapterFactory } from './types.j
 
 interface Http2Stream {
   on(event: string, listener: (...args: any[]) => void): this;
+  once?(event: string, listener: (...args: any[]) => void): this;
   end(body?: unknown): void;
   close?(code?: number): void;
   write?(chunk: unknown): boolean;
+  pause?(): void;
+  resume?(): void;
 }
 
 interface Http2Session {
-  request(headers: Record<string, string>): Http2Stream;
+  request(headers: Record<string, string>, options?: { endStream?: boolean }): Http2Stream;
   on?(event: string, listener: (...args: any[]) => void): this;
   close?(): void;
+  destroy?(): void;
+  unref?(): void;
+  readonly closed?: boolean;
+  readonly destroyed?: boolean;
 }
 
 interface Http2Module {
@@ -103,6 +110,34 @@ interface RequestTransferOptions {
   rateLimit?: RateLimitOptions;
 }
 
+/** Resolve when the stream has drained, or reject when it closes/aborts first. */
+function waitForDrain(stream: Http2Stream, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+      stream.on?.('drain', onDrain);
+      stream.on?.('close', onClose);
+      stream.on?.('error', onClose);
+    };
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const onDrain = () => finish();
+    const onClose = () => finish(signalReason(signal));
+    const onAbort = () => finish(signalReason(signal));
+    stream.on?.('drain', onDrain);
+    stream.on?.('close', onClose);
+    stream.on?.('error', onClose);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
 async function writeRequestChunk(
   stream: Http2Stream,
   chunk: Uint8Array,
@@ -117,8 +152,11 @@ async function writeRequestChunk(
     });
   }
   if (signal.aborted) throw signalReason(signal);
-  stream.write?.(chunk);
+  // `write()` returning false means the internal buffer is full. Ignoring it
+  // lets a fast producer outrun the socket and grow memory without bound.
+  const writable = stream.write?.(chunk);
   options.tracker?.update(options.tracker.loaded + chunk.byteLength);
+  if (writable === false) await waitForDrain(stream, signal);
 }
 
 /** Convert browser BodyInit values to chunks accepted by Node's http2 stream. */
@@ -199,7 +237,14 @@ async function endRequest(
   if (signal.aborted) throw signalReason(signal);
   if (isReadableStreamBody(body)) {
     const reader = body.getReader();
+    // Cancelling during a byte-throttle wait must also cancel the upload
+    // source. Releasing the reader lock does not run the source's cleanup.
+    const onAbort = () => {
+      try { void reader.cancel(signalReason(signal)).catch(() => undefined); } catch { /* already closed */ }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
     try {
+      if (signal.aborted) throw signalReason(signal);
       while (true) {
         const result = await readChunk(reader, signal);
         if (result.done) break;
@@ -209,6 +254,7 @@ async function endRequest(
       options.tracker?.complete();
       return;
     } finally {
+      signal.removeEventListener('abort', onAbort);
       try { reader.releaseLock(); } catch { /* a pending read may still own the lock */ }
     }
   }
@@ -240,6 +286,9 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
 
     const state: Http2SessionState = { active: new Set(), closed: false };
     sessionStates.set(session, state);
+    // An idle session keeps the event loop referenced, which prevents a
+    // one-shot script from exiting after its responses were consumed.
+    try { session.unref?.(); } catch { /* optional runtime capability */ }
     const discard = () => {
       if (sessions.get(origin) === session) sessions.delete(origin);
     };
@@ -254,6 +303,13 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
       }
     };
     session.on?.('error', (cause: unknown) => failActive(cause));
+    // A GOAWAY means the peer will not accept new streams on this session even
+    // though existing ones may still finish and `close` has not fired yet.
+    // Retire it from the pool so new requests open a fresh connection.
+    session.on?.('goaway', () => {
+      discard();
+      state.closed = true;
+    });
     session.on?.('close', () => {
       if (state.active.size > 0) {
         failActive(state.failure ?? new Error('HTTP/2 session closed before streams completed'));
@@ -282,7 +338,7 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
     };
   };
 
-  return async (config: AdapterConfig): Promise<AdapterResult> => {
+  const factory = (async (config: AdapterConfig): Promise<AdapterResult> => {
     const startedAt = Date.now();
     // Direct adapter consumers may provide the cancellation signal through
     // rateLimit instead of the resolved request signal.
@@ -306,9 +362,14 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
 
     const requestHeaders: Record<string, string> = {
       ':method': config.method,
-      ':path': `${target.pathname || '/'}${target.search}`,
       ':authority': target.host,
     };
+    // Node ends the writable side immediately for methods it considers
+    // body-less (DELETE among them). Opting out explicitly is required before
+    // writing a request body, and CONNECT must omit `:path` entirely.
+    if (config.method !== 'CONNECT') {
+      requestHeaders[':path'] = `${target.pathname || '/'}${target.search}`;
+    }
     config.headers.forEach((value, name) => {
       if (!name.startsWith(':')) requestHeaders[name.toLowerCase()] = value;
     });
@@ -329,7 +390,10 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
         signal,
       })
       : undefined;
-    const stream = session.request(requestHeaders);
+    // DELETE defaults to an ended writable side in Node, so the body could
+    // never be written. Always create the stream with `endStream: false` and
+    // close it explicitly once the body has been sent.
+    const stream = session.request(requestHeaders, { endStream: false });
     const cancelCode = http2.constants?.NGHTTP2_CANCEL ?? 8;
     const requestBodyAbort = new AbortController();
     let transportClosed = false;
@@ -352,7 +416,7 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
 
     const cleanupAbort = () => {
       if (!onAbort) return;
-      if (responsePromiseSettled && requestBodyDone && bodyClosed) {
+      if (responsePromiseSettled && bodyClosed) {
         signal?.removeEventListener('abort', onAbort);
         onAbort = undefined;
       }
@@ -406,6 +470,12 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
         stream.on('data', (chunk: unknown) => {
           if (bodyClosed) return;
           try { controller.enqueue(toBytes(chunk)); } catch { /* consumer canceled */ }
+          // Respect the consumer's pace: pausing the source when the internal
+          // queue is full prevents unbounded buffering on large downloads.
+          const desired = controller.desiredSize;
+          if (desired !== null && desired <= 0) {
+            try { stream.pause?.(); } catch { /* unsupported by the transport */ }
+          }
         });
         stream.on('end', () => {
           if (bodyClosed) return;
@@ -433,6 +503,10 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
             cleanupAbort();
           }
         });
+      },
+      pull() {
+        // The consumer is ready for more data; resume the paused source.
+        try { stream.resume?.(); } catch { /* unsupported by the transport */ }
       },
       cancel(reason) {
         if (bodyClosed) return;
@@ -469,12 +543,32 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
           }
           const responseHeaders = new Headers();
           for (const [name, value] of Object.entries(headers)) {
-            if (!name.startsWith(':')) responseHeaders.append(name, String(value));
+            if (name.startsWith(':')) continue;
+            // `set-cookie` is the one response field HTTP allows to repeat as a
+            // list. String(value) would join the cookies with commas and lose
+            // the individual boundaries, breaking session handling.
+            if (Array.isArray(value)) {
+              for (const item of value) responseHeaders.append(name, String(item));
+            } else {
+              responseHeaders.append(name, String(value));
+            }
           }
           if ([204, 205, 304].includes(status)) {
-            markBodyClosed();
+            // No payload will ever arrive. Settle first, then release the abort
+            // listener: `cleanupAbort` needs both flags set, so calling it
+            // before the promise is marked settled would skip the removal and
+            // leak the listener (plus its captured stream) for the whole life
+            // of a long-lived caller signal.
+            bodyClosed = true;
             responsePromiseSettled = true;
             resolve(new Response(null, { status, headers: responseHeaders }));
+            maybeUnregisterSessionStream();
+            cleanupAbort();
+            // Nothing more will be written; a response without a body still
+            // needs the request body path to stop.
+            if (!requestBodyAbort.signal.aborted) {
+              requestBodyAbort.abort(networkError(new Error('HTTP/2 response has no body')));
+            }
             return;
           }
           const responseBody = config.onDownloadProgress || (config.rateLimiter && config.rateLimit?.bytesPerSecond)
@@ -535,10 +629,40 @@ export function createNodeHttp2Adapter(options: NodeHttp2AdapterOptions = {}): H
         maybeUnregisterSessionStream();
         cleanupAbort();
       });
+    // The upload is allowed to outlive the response. Once the response is fully
+    // consumed nothing further will be written, so stop the reader instead of
+    // leaving the body source open; its rejection is expected in that case.
+    requestBody.catch(() => undefined);
 
-    const [response] = await Promise.all([responsePromise, requestBody]);
+    // RFC 9113 permits the server to send a complete response before the
+    // request body has been fully written (for example an early 413). Waiting
+    // for the upload would hide that status until the body source produces
+    // another chunk, so the adapter returns as soon as the response is
+    // complete. `responseBodyDone` resolves when the response body has ended.
+    const response = await responsePromise;
     return { response, metadata: { protocol: 'h2', timings: { startedAt } } };
+  }) as HttpAdapterFactory & {
+    closeTransport?: () => void;
+    releaseStream?: () => void;
   };
+  /**
+   * Close every pooled session. Without an explicit release an idle session can
+   * hold the process open indefinitely, and repeated adapter creation would
+   * keep abandoned connections alive.
+   */
+  factory.closeTransport = () => {
+    const pending = [...sessions.values()];
+    sessions.clear();
+    for (const session of pending) {
+      try { session.close?.(); } catch { /* session already closing */ }
+      try { session.destroy?.(); } catch { /* session already destroyed */ }
+    }
+  };
+  factory.releaseStream = () => {
+    // Per-request listeners are owned and removed by the request scope itself;
+    // nothing global needs releasing here.
+  };
+  return factory;
 }
 
 export const nodeHttp2Adapter = createNodeHttp2Adapter();

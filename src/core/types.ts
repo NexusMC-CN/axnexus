@@ -123,7 +123,15 @@ export interface HttpResponse<T = unknown> {
   timings: ResponseTimings;
 }
 
-export type HttpAdapter = (config: ResolvedRequestConfig) => Promise<Response | AdapterResult>;
+export type HttpAdapter = ((config: ResolvedRequestConfig) => Promise<Response | AdapterResult>) & {
+  /**
+   * Optional: release transport resources (and cancellation listeners) that the
+   * adapter keeps for the request currently being processed.
+   */
+  releaseStream?: () => void;
+  /** Optional: close long-lived transports (for example HTTP/2 sessions). */
+  closeTransport?: () => void | Promise<void>;
+};
 
 export type InterceptorFulfilled<T> = (value: T) => T | Promise<T>;
 export type InterceptorRejected<T> = (error: unknown) => T | Promise<T>;
@@ -152,6 +160,11 @@ export interface HttpClient {
   delete<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
   deleteResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
   clearCache(): void;
+  /**
+   * Release transports the adapter holds open (for example HTTP/2 sessions).
+   * Without this an idle session can keep a one-shot process alive.
+   */
+  close(): void | Promise<void>;
   interceptors: {
     request: import('./interceptors.js').RequestInterceptorManager;
     response: import('./interceptors.js').InterceptorManager<HttpResponse<unknown>>;

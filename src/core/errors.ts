@@ -9,6 +9,7 @@ export type HttpErrorCode =
   | 'ERR_TRANSFORM_REQUEST'
   | 'ERR_TRANSFORM_RESPONSE'
   | 'ERR_INVALID_HEADER'
+  | 'ERR_INVALID_STATUS_POLICY'
   | 'ERR_RATE_LIMIT_QUEUE_TIMEOUT'
   | 'ERR_UNSUPPORTED_ADAPTER'
   | 'ERR_MAX_BODY_SIZE'
@@ -56,6 +57,11 @@ export function toError(
   timeoutTriggered: boolean,
   canceled: boolean,
 ): HttpError {
+  // An error that already carries a classification must not be re-classified.
+  // A total timeout can fire and the caller's signal can then be aborted while
+  // the ETIMEDOUT is still propagating; without this check the timeout would be
+  // reported as a caller cancellation and lose `isTimeout`.
+  if (error instanceof HttpError && (error.isTimeout || error.isAbort)) return error;
   // The controller that timed out/canceled the attempt is authoritative even
   // when a custom adapter reports a generic HttpError of its own.
   if (timeoutTriggered) {
