@@ -237,14 +237,31 @@ export class RateLimiter {
       this.wakeTimer = undefined;
       this.pump();
     }, Math.max(1, delayMs));
-    // Do not keep the event loop alive for a scheduler-only wake-up.
-    (this.wakeTimer as { unref?: () => void }).unref?.();
+    // A queued task's only remaining reason to exist is this timer, so it must
+    // keep the event loop alive — otherwise the loop drains, the pending
+    // request never settles, and Node's test runner cancels it. Only unref once
+    // the queue is actually empty, so an idle limiter never holds a script open.
+    this.syncWakeRef();
+  }
+
+  /**
+   * Keep the wake-up timer anchored while tasks are queued, and release the
+   * event loop when nothing is waiting.
+   */
+  private syncWakeRef(): void {
+    if (!this.wakeTimer) return;
+    const timer = this.wakeTimer as { ref?: () => void; unref?: () => void };
+    if (this.queue.length > 0) timer.ref?.();
+    else timer.unref?.();
   }
 
   private pump(): void {
     if (this.pumping) return;
     this.pumping = true;
     try {
+      // Any queue mutation routes through here, so this is the one place that
+      // must keep the wake-up timer in step with the queue.
+      this.syncWakeRef();
       this.evictIdleGroups(Date.now());
       while (this.queue.length) {
         this.queue.sort((a, b) => (Number(b.options.priority) || 0) - (Number(a.options.priority) || 0) || a.sequence - b.sequence);

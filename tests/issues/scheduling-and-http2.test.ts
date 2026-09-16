@@ -166,6 +166,31 @@ test('issue 53: the rate limiter exposes resource-group bookkeeping', () => {
   assert.equal(limiter.groupCount(), 0);
 });
 
+// A queued task's only pending work is the scheduler's wake-up timer. If that
+// timer is unref'd the event loop drains, the queued promise never settles, and
+// Node's test runner cancels the whole file with "Promise resolution is still
+// pending but the event loop has already resolved". This reproduced on CI while
+// passing locally, so pin the timer's ref state directly.
+test('a queued task keeps the wake-up timer anchored on the event loop', async () => {
+  const limiter = new RateLimiter({ requestsPerInterval: 1, interval: 5_000 });
+  // Consume the only slot in this window so the next call must queue.
+  await limiter.run(() => undefined);
+
+  const controller = new AbortController();
+  let ran = false;
+  const queued = limiter.run(() => { ran = true; }, { signal: controller.signal });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const wakeTimer = (limiter as unknown as { wakeTimer?: { hasRef?: () => boolean } }).wakeTimer;
+  assert.notEqual(wakeTimer, undefined, 'a queued task must install a wake-up timer');
+  assert.equal(wakeTimer?.hasRef?.(), true, 'the wake-up timer must keep the event loop alive');
+  assert.equal(ran, false, 'the queued task must still be waiting');
+
+  // Cancel the queued task so no wake-up timer outlives this test.
+  controller.abort();
+  await queued.catch(() => undefined);
+});
+
 // #25 — GOAWAY retires the session from the reuse pool.
 test('issue 25: a GOAWAY retires the session so new requests reconnect', async () => {
   const sessions: ManualSession[] = [];
