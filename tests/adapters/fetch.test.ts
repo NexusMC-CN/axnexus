@@ -182,10 +182,29 @@ test('fetch adapter does not forward Node-only transport options to Bun', { skip
     headers: new Headers(),
     dispatcher: { dispatch() {} },
     agent: { protocol: 'https:' },
-    duplex: 'half',
   } as never);
 
   assert.equal(seenInit?.dispatcher, undefined);
   assert.equal(seenInit?.agent, undefined);
-  assert.equal(seenInit?.duplex, undefined);
+});
+
+test('fetch adapter forwards duplex to Bun for a readable stream body', { skip: !isBunRuntime }, async () => {
+  let seenInit: (RequestInit & { duplex?: string }) | undefined;
+  const adapter = createFetchAdapter(async (_input, init) => {
+    seenInit = init as typeof seenInit;
+    return new Response('ok');
+  });
+
+  await adapter({
+    url: 'https://example.test',
+    method: 'POST',
+    headers: new Headers(),
+    body: new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1])); controller.close(); },
+    }),
+  } as never);
+
+  // Bun 1.4.2 accepts `duplex` with both stream and plain bodies, and the Fetch
+  // standard requires it for a stream body, so it is always forwarded.
+  assert.equal(seenInit?.duplex, 'half');
 });
