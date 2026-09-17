@@ -175,11 +175,23 @@ export class AxiosHeaders implements Iterable<[string, HeaderValue]> {
   set(headers: HeaderInput, rewrite?: HeaderRewrite): this;
   set(nameOrHeaders: HeaderInput, valueOrRewrite?: HeaderValue | HeaderRewrite, rewrite?: HeaderRewrite): this {
     // A raw header block is recognized whether or not a rewrite argument is
-    // present; previously `set('X-Trace: next', true)` treated the whole string
-    // as a header name and threw ERR_INVALID_HEADER.
-    if (typeof nameOrHeaders === 'string' && typeof valueOrRewrite !== 'function'
-      && nameOrHeaders.includes(':')) {
-      const effectiveRewrite = rewrite ?? (valueOrRewrite as HeaderRewrite | undefined);
+    // present. `set('X-Trace: next', true)` previously treated the whole string
+    // as a header name and threw ERR_INVALID_HEADER; the same happened for a
+    // rewrite function, because the guard treated any function second argument
+    // as a value. `HeaderValue` cannot be a function, so a function argument is
+    // always the rewrite policy.
+    if (typeof nameOrHeaders === 'string' && nameOrHeaders.includes(':')) {
+      // A boolean second argument is always the rewrite policy, never a value:
+      // `HeaderValue` has no boolean form. Treating `false` as "no rewrite
+      // argument" made `set('X-A: 1', false)` silently apply the block, so a
+      // caller asking not to rewrite was obeyed then ignored.
+      const effectiveRewrite = typeof valueOrRewrite === 'function' || typeof valueOrRewrite === 'boolean'
+        ? (valueOrRewrite as HeaderRewrite)
+        : rewrite ?? (valueOrRewrite as HeaderRewrite | undefined);
+      // `set('X-A: 1', false)` asks for the block not to be applied at all.
+      // The per-name path below only skips a rewrite when a value already
+      // exists, which would still insert the header on a fresh instance.
+      if (effectiveRewrite === false) return this;
       for (const line of nameOrHeaders.split(/\r?\n/)) {
         const separator = line.indexOf(':');
         if (separator > 0) this.set(line.slice(0, separator), line.slice(separator + 1).trim(), effectiveRewrite);

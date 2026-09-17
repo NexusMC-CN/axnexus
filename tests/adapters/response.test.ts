@@ -40,7 +40,7 @@ test('distinguishes a JSON null payload from an absent payload', async () => {
   assert.equal(await readResponse(new Response('null'), 'json'), null);
 });
 
-test('releases the response body reader after buffering', async () => {
+test('issue 4: releases the response body reader after buffering', async () => {
   const response = new Response(new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(new TextEncoder().encode('{"ok":true}'));

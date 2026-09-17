@@ -144,11 +144,15 @@ export async function createResolvedConfig(
     }
   }
   let body: BodyInit | null | undefined;
-  // A body that was already encoded for this config must not be serialized a
-  // second time. The fallback path in the pipeline builds a config only to
-  // describe an error, and re-running a stateful stringifier there would
-  // duplicate its side effects and consume one-shot data.
-  if (!applyTransforms && Object.prototype.hasOwnProperty.call(request, 'body')) {
+  // With `applyTransforms` disabled the caller only wants a config shaped for
+  // reporting; the body was already encoded during setup. Re-running a stateful
+  // stringifier here would duplicate its side effects, consume one-shot data,
+  // and — as the error fallback path showed — serialize twice when the request
+  // carried `data` rather than an already-encoded `body`.
+  if (!applyTransforms && (
+    Object.prototype.hasOwnProperty.call(request, 'body')
+    || Object.prototype.hasOwnProperty.call(request, 'data')
+  )) {
     body = request.body;
   } else {
     const stringifyJson = request.stringifyJson ?? defaults.stringifyJson ?? JSON.stringify;

@@ -113,7 +113,7 @@ test('xhr adapter treats status zero as a network error', async () => {
   }
 });
 
-test('xhr adapter classifies a core timeout abort as ETIMEDOUT', async () => {
+test('issue 24: xhr adapter classifies a core timeout abort as ETIMEDOUT', async () => {
   class HangingXHR {
     upload = {};
     onreadystatechange: (() => void) | null = null;

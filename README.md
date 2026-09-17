@@ -252,7 +252,7 @@ const value = await cache.getOrLoad('catalog', loadCatalog, {
 
 ### `maxBodySize`
 
-`maxBodySize` 默认值是 `undefined`，表示不限制响应体大小；负数、`NaN` 和 `Infinity` 也按“不限制”处理。若响应声明了有效的 `Content-Length`，会在读取前先检查；可读流会逐块累计，超过上限立即停止读取、取消 reader 并抛出 `ERR_MAX_BODY_SIZE`；没有可读流的响应只能在完成缓冲后检查。错误响应的 payload 读取超过上限时会置为 `null`，不会覆盖原始 HTTP 状态错误。
+`maxBodySize` 默认值是 `undefined`，表示不限制响应体大小；负数、`NaN`、`Infinity` 以及非数字值（如 `null`、`false`、`''`）也按“不限制”处理，只有真正的数字才会生效。若响应声明了有效的 `Content-Length`，会在读取前先检查；可读流会逐块累计，超过上限立即停止读取、取消 reader 并抛出 `ERR_MAX_BODY_SIZE`；没有可读流的响应只能在完成缓冲后检查。错误响应的 payload 读取超过上限时会置为 `null`，不会覆盖原始 HTTP 状态错误。`responseType: 'response'` 返回原始响应时会保留 `url`、`redirected` 和 `type`，因此读取最终 URL 或重定向链不受 `maxBodySize` 影响。
 
 ### `uploadChunks` 的 signal、重试与进度
 

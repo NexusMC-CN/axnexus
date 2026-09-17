@@ -91,7 +91,9 @@ export async function runRequestPipeline<T>(
     const fallbackWasGenerated = Boolean(requestIdEnabled && !initialRequestIdPresent && fallbackRequestId);
     if (fallbackRequestId) initialHeaders.set('X-Request-Id', fallbackRequestId);
     interceptedConfig = await raceWithSignal(
-      applyInterceptorChain(requestInterceptors, { ...input, headers: initialHeaders }),
+      applyInterceptorChain(requestInterceptors, { ...input, headers: initialHeaders }, {
+        signal: setupSignals.signal,
+      }),
       setupSignals.signal,
     );
     // Normalize interceptor output through the same method-aware merge path.
@@ -181,7 +183,7 @@ export async function runRequestPipeline<T>(
             const retryInput = await raceWithSignal(applyInterceptorChain(requestInterceptors, {
               ...interceptedConfig!,
               headers: AxiosHeaders.from(interceptedConfig!.headers),
-            }), retrySignals.signal);
+            }, { signal: retrySignals.signal }), retrySignals.signal);
             interceptedConfig = retryInput;
             const retryConfigSignals = combineSignals([
               retrySignals.signal,
@@ -235,7 +237,9 @@ export async function runRequestPipeline<T>(
               retryOn,
               overallSignal: attemptSignals.signal,
               queuedAt,
-              timeoutMs,
+              // A retry interceptor may rewrite `timeout`, so the per-attempt
+              // value must be recomputed instead of reusing the first attempt's.
+              timeoutMs: normalizeTimeout(attemptResolved.timeout ?? defaults.timeout),
               totalTimeoutEnabled: Boolean(totalController),
               totalTimeoutTriggered: () => totalTimeoutTriggered,
               rateLimiter,

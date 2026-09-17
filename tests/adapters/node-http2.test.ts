@@ -240,7 +240,7 @@ test('fails in-flight streams when the shared session closes before response hea
   assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
 });
 
-test('returns an early bodyless response without waiting for a stalled upload', async () => {
+test('issue 34: returns an early bodyless response without waiting for a stalled upload', async () => {
   const session = new ManualSession();
   const adapter = createNodeHttp2Adapter({
     module: {
@@ -307,7 +307,7 @@ test('aborts a pending request body when the shared session errors after an earl
   assert.notEqual(canceled, undefined);
 });
 
-test('http2 adapter removes abort side effects after response body completes', async () => {
+test('issue 32: http2 adapter removes abort side effects after response body completes', async () => {
   const session = new MockSession();
   const controller = new AbortController();
   const adapter = createNodeHttp2Adapter({ module: { connect: () => session, constants: { NGHTTP2_CANCEL: 8 } } });
@@ -450,7 +450,7 @@ test('http2 adapter settles when a stream errors while listeners are being attac
   assert.equal((error as { code?: string }).code, 'ERR_NETWORK');
 });
 
-test('http2 adapter cancels a pending request-body read when the signal aborts', async () => {
+test('issue 51: http2 adapter cancels a pending request-body read when the signal aborts', async () => {
   const session = new ManualSession();
   let bodyCanceled = false;
   const body = new ReadableStream<Uint8Array>({

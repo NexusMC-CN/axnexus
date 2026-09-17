@@ -67,11 +67,32 @@ export function createRequestInterceptorManager(): RequestInterceptorManager {
 export async function applyInterceptorChain<T>(
   manager: InterceptorManager<T>,
   value: T,
-  options: { reverse?: boolean } = {},
+  options: { reverse?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
+  const handlers = manager.getHandlers(options.reverse);
+  const { signal } = options;
+  // Racing the chain only settles the caller's promise; handlers already
+  // queued would still run. Stop before starting work for a request that has
+  // been cancelled.
+  const guard = (): void => {
+    if (signal?.aborted) throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+  };
   let chain: Promise<T> = Promise.resolve(value) as Promise<T>;
-  for (const handler of manager.getHandlers(options.reverse)) {
-    chain = chain.then(handler.fulfilled, handler.rejected);
+  for (const handler of handlers) {
+    // The guard must cover the rejected path as well: a recovering handler
+    // would otherwise resurrect a request whose signal has already aborted.
+    chain = chain.then(
+      (current) => {
+        guard();
+        return Promise.resolve(handler.fulfilled ? handler.fulfilled(current) : current);
+      },
+      handler.rejected
+        ? (error: unknown) => {
+          guard();
+          return Promise.resolve(handler.rejected!(error));
+        }
+        : undefined,
+    );
   }
   return chain;
 }

@@ -1,9 +1,20 @@
 import { HttpError } from '../core/errors.js';
 import type { JsonParser, ResponseType } from '../core/types.js';
 
+/**
+ * `undefined`, negative, NaN and Infinity intentionally mean unlimited.
+ * Only a real number counts: `null`/`false`/`''` coerce to 0 and would
+ * otherwise silently become a zero-byte limit that rejects every body.
+ */
+function normalizeMaxBodySize(maxBodySize: number | undefined): number | undefined {
+  if (typeof maxBodySize !== 'number') return undefined;
+  return maxBodySize;
+}
+
 /** `undefined`, negative, NaN and Infinity intentionally mean unlimited. */
 function assertSize(size: number, maxBodySize: number | undefined): void {
-  if (maxBodySize !== undefined && maxBodySize >= 0 && size > maxBodySize) {
+  const limit = normalizeMaxBodySize(maxBodySize);
+  if (limit !== undefined && limit >= 0 && size > limit) {
     throw new HttpError('Response body exceeds maxBodySize', { code: 'ERR_MAX_BODY_SIZE' });
   }
 }
@@ -220,6 +231,65 @@ async function readBytes(
   return bytes;
 }
 
+/**
+ * Apply `maxBodySize` to a response returned in raw `responseType: 'response'`
+ * mode. The caller owns the body, so the limit cannot be enforced by buffering:
+ * the declared `Content-Length` is rejected up front and the body stream is
+ * wrapped so an oversized or chunked response still fails while it is consumed.
+ * HEAD and bodyless statuses carry no payload and are left untouched.
+ */
+function limitRawResponse(response: Response, maxBodySize?: number): Response {
+  const limit = normalizeMaxBodySize(maxBodySize);
+  if (limit === undefined || !Number.isFinite(limit) || limit < 0) return response;
+  if (carriesNoPayload(response)) return response;
+  const declared = declaredSize(response);
+  if (declared !== undefined && declared > limit) {
+    cancelBody(response);
+    throw new HttpError(`Response body exceeds maxBodySize (${declared} > ${limit})`, {
+      code: 'ERR_MAX_BODY_SIZE',
+    });
+  }
+  if (!response.body) return response;
+  let seen = 0;
+  const source = response.body.getReader();
+  const limited = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await source.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      seen += value.byteLength;
+      if (seen > limit) {
+        const error = new HttpError(`Response body exceeds maxBodySize (${seen} > ${limit})`, {
+          code: 'ERR_MAX_BODY_SIZE',
+        });
+        void source.cancel(error).catch(() => undefined);
+        controller.error(error);
+        return;
+      }
+      controller.enqueue(value);
+    },
+    cancel(reason) {
+      return source.cancel(reason);
+    },
+  });
+  const wrapped = new Response(limited, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+  // `new Response(...)` cannot carry `url`/`redirected`/`type` from the
+  // original: those describe the fetch that produced it, and losing them
+  // breaks callers that inspect the final URL or the redirect chain.
+  for (const [key, value] of [['url', response.url], ['redirected', response.redirected], ['type', response.type]] as const) {
+    try {
+      Object.defineProperty(wrapped, key, { value, configurable: true, enumerable: true });
+    } catch { /* a runtime may expose these as non-configurable getters */ }
+  }
+  return wrapped;
+}
+
 export async function readResponse(
   response: Response,
   type: ResponseType = 'json',
@@ -227,7 +297,7 @@ export async function readResponse(
   parseJson: JsonParser = (text) => JSON.parse(text),
   signal?: AbortSignal,
 ): Promise<unknown | undefined> {
-  if (type === 'response') return response;
+  if (type === 'response') return limitRawResponse(response, maxBodySize);
   // No payload at all: 204/205/304 and HEAD. Distinct from a JSON `null` body,
   // which is a real value that schema validation must still see.
   if (carriesNoPayload(response)) return undefined;

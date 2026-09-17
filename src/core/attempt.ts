@@ -226,7 +226,10 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     };
     responseInterceptorChainStarted = true;
     return await raceWithSignal(
-      applyInterceptorChain(responseInterceptors, response, { reverse: true }),
+      applyInterceptorChain(responseInterceptors, response, {
+        reverse: true,
+        signal: attemptConfig.signal,
+      }),
       attemptConfig.signal,
     );
   } catch (error) {

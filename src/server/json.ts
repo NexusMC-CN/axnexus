@@ -1,6 +1,7 @@
 import type { JsonParser, StandardSchema } from '../core/types.js';
 import { HttpError } from '../core/errors.js';
 import { validateStandardSchema } from '../core/schema.js';
+import { raceWithSignal } from '../core/control.js';
 import { AxiosHeaders, type HeaderInput } from '../headers/headers.js';
 import { combineSignals } from '../utils/signal.js';
 import { cancelBody, readResponse } from '../utils/response.js';
@@ -77,8 +78,20 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
     let data = (payload === undefined ? null : payload) as T | null;
     if (schema && payload !== undefined) {
       try {
-        data = await validateStandardSchema(payload, schema) as T;
+        // A Standard Schema validator may be asynchronous and never settle.
+        // Racing it against the combined signal keeps `timeoutMs`/`timeout` and
+        // caller cancellation effective during validation, matching the client
+        // pipeline.
+        data = await raceWithSignal(
+          Promise.resolve(validateStandardSchema(payload, schema) as T | Promise<T>),
+          combined.signal,
+        ) as T;
       } catch (cause) {
+        // A timeout/cancellation is not a validation failure: rethrow it so the
+        // caller still sees the native `AbortError` (name 'AbortError'), which
+        // is what the fetch phase propagates too — it is deliberately not
+        // rewritten into ETIMEDOUT / ERR_CANCELED.
+        if (combined.signal?.aborted) throw cause;
         throw new HttpError('Response schema validation failed', {
           code: 'ERR_SCHEMA_VALIDATION',
           cause,

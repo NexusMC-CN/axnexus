@@ -212,7 +212,7 @@ test('issue 13: a HEAD Content-Length is not enforced as a real body size', asyn
   assert.equal(bytes, undefined);
 });
 
-test('issue 13: HEAD does not report a fabricated download of the declared size', async () => {
+test('issue 13 / issue 52: HEAD does not report a fabricated download of the declared size', async () => {
   const client = createHttpClient({
     // A HEAD response carries no body but advertises the GET resource size.
     adapter: async () => new Response(null, {
