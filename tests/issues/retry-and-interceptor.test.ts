@@ -103,3 +103,49 @@ test('issue 28: cancelling stops interceptors that have not started yet', async 
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.deepEqual(started, ['first'], 'a cancelled request must not start later interceptors');
 });
+
+test('issue 28: cancelling stops request transforms that have not started yet', async () => {
+  const controller = new AbortController();
+  let releaseFirst!: () => void;
+  const firstFinished = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let secondCalls = 0;
+  const client = createHttpClient({ adapter: async () => jsonResponse({ ok: true }) });
+
+  const pending = client.post('/cancel-request-transforms', { value: 1 }, {
+    signal: controller.signal,
+    transformRequest: [
+      async (value) => { await firstFinished; return value; },
+      (value) => { secondCalls += 1; return value; },
+    ],
+  } as never);
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  await assert.rejects(pending, (error: unknown) => (error as { code?: string }).code === 'ERR_CANCELED');
+
+  releaseFirst();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(secondCalls, 0, 'a cancelled request must not start the next request transform');
+});
+
+test('issue 28: cancelling stops response transforms that have not started yet', async () => {
+  const controller = new AbortController();
+  let releaseFirst!: () => void;
+  const firstFinished = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let secondCalls = 0;
+  const client = createHttpClient({ adapter: async () => jsonResponse({ ok: true }) });
+
+  const pending = client.get('/cancel-response-transforms', {
+    signal: controller.signal,
+    transformResponse: [
+      async (value) => { await firstFinished; return value; },
+      (value) => { secondCalls += 1; return value; },
+    ],
+  } as never);
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  await assert.rejects(pending, (error: unknown) => (error as { code?: string }).code === 'ERR_CANCELED');
+
+  releaseFirst();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(secondCalls, 0, 'a cancelled request must not start the next response transform');
+});

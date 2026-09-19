@@ -2,7 +2,8 @@ import type { JsonParser, StandardSchema } from '../core/types.js';
 import { HttpError } from '../core/errors.js';
 import { validateStandardSchema } from '../core/schema.js';
 import { raceWithSignal } from '../core/control.js';
-import { AxiosHeaders, type HeaderInput } from '../headers/headers.js';
+import type { HeaderInput } from '../headers/headers.js';
+import { mergeMethodHeaders } from '../headers/methods.js';
 import { combineSignals } from '../utils/signal.js';
 import { cancelBody, readResponse } from '../utils/response.js';
 
@@ -24,8 +25,8 @@ export interface FetchJsonResult<T = unknown> {
   response: Response;
 }
 
-function buildHeaders(headers: HeaderInput | undefined, cookie: string | undefined): Headers {
-  const store = AxiosHeaders.from(headers);
+function buildHeaders(headers: HeaderInput | undefined, cookie: string | undefined, method: string): Headers {
+  const store = mergeMethodHeaders(undefined, method, headers);
   // Honour the `false` opt-out the client uses before falling back to defaults:
   // converting to native Headers first would erase the sentinel and let the
   // default value (or the injected cookie) resurrect a disabled header.
@@ -59,7 +60,7 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
     const response = await fetchImpl(url, {
       ...init,
       signal: combined.signal,
-      headers: buildHeaders(headers, cookie),
+      headers: buildHeaders(headers, cookie, String(init.method ?? 'GET').toUpperCase()),
     });
     const bodylessStatus = response.status === 204 || response.status === 205 || response.status === 304;
     const noBody = bodylessStatus

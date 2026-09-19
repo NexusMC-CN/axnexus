@@ -6,6 +6,8 @@ import type { AdapterConfig, AdapterResult, HttpAdapterFactory } from './types.j
 interface Http2Stream {
   on(event: string, listener: (...args: any[]) => void): this;
   once?(event: string, listener: (...args: any[]) => void): this;
+  off?(event: string, listener: (...args: any[]) => void): this;
+  removeListener?(event: string, listener: (...args: any[]) => void): this;
   end(body?: unknown): void;
   close?(code?: number): void;
   write?(chunk: unknown): boolean;
@@ -114,11 +116,15 @@ interface RequestTransferOptions {
 function waitForDrain(stream: Http2Stream, signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false;
+    const removeListener = (event: string, listener: (...args: any[]) => void) => {
+      if (stream.off) stream.off(event, listener);
+      else stream.removeListener?.(event, listener);
+    };
     const cleanup = () => {
       signal.removeEventListener('abort', onAbort);
-      stream.on?.('drain', onDrain);
-      stream.on?.('close', onClose);
-      stream.on?.('error', onClose);
+      removeListener('drain', onDrain);
+      removeListener('close', onClose);
+      removeListener('error', onClose);
     };
     const finish = (error?: unknown) => {
       if (settled) return;

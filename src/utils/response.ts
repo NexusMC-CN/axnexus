@@ -75,6 +75,25 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
 }
 
+interface RawResponseLifecycle {
+  finished: boolean;
+  cleanups: Set<() => void>;
+}
+
+const RAW_RESPONSE_LIFECYCLES = new WeakMap<Response, RawResponseLifecycle>();
+
+/**
+ * Keep request cancellation and transport resources alive while a caller owns
+ * a raw response body. Returns true only when cleanup was deferred.
+ */
+export function deferResponseBodyCleanup(response: Response | undefined, cleanup: () => void): boolean {
+  if (!response) return false;
+  const lifecycle = RAW_RESPONSE_LIFECYCLES.get(response);
+  if (!lifecycle || lifecycle.finished) return false;
+  lifecycle.cleanups.add(cleanup);
+  return true;
+}
+
 function readAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) {
@@ -238,12 +257,18 @@ async function readBytes(
  * wrapped so an oversized or chunked response still fails while it is consumed.
  * HEAD and bodyless statuses carry no payload and are left untouched.
  */
-function limitRawResponse(response: Response, maxBodySize?: number): Response {
+function limitRawResponse(response: Response, maxBodySize?: number, signal?: AbortSignal): Response {
   const limit = normalizeMaxBodySize(maxBodySize);
-  if (limit === undefined || !Number.isFinite(limit) || limit < 0) return response;
+  const enforcesLimit = limit !== undefined && Number.isFinite(limit) && limit >= 0;
+  if (!enforcesLimit && !signal) return response;
   if (carriesNoPayload(response)) return response;
+  if (signal?.aborted) {
+    const reason = abortReason(signal);
+    cancelBody(response, reason);
+    throw reason;
+  }
   const declared = declaredSize(response);
-  if (declared !== undefined && declared > limit) {
+  if (enforcesLimit && declared !== undefined && declared > limit) {
     cancelBody(response);
     throw new HttpError(`Response body exceeds maxBodySize (${declared} > ${limit})`, {
       code: 'ERR_MAX_BODY_SIZE',
@@ -252,26 +277,77 @@ function limitRawResponse(response: Response, maxBodySize?: number): Response {
   if (!response.body) return response;
   let seen = 0;
   const source = response.body.getReader();
+  const lifecycle: RawResponseLifecycle = { finished: false, cleanups: new Set() };
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const releaseSourceLock = () => {
+    try { source.releaseLock(); } catch { /* a read/cancel may still be settling */ }
+  };
+  const finish = () => {
+    if (lifecycle.finished) return;
+    lifecycle.finished = true;
+    signal?.removeEventListener('abort', onAbort);
+    for (const cleanup of lifecycle.cleanups) {
+      try { cleanup(); } catch { /* cleanup must not replace the stream result */ }
+    }
+    lifecycle.cleanups.clear();
+  };
+  const onAbort = () => {
+    if (lifecycle.finished) return;
+    const reason = abortReason(signal!);
+    try {
+      void source.cancel(reason).catch(() => undefined).finally(releaseSourceLock);
+    } catch {
+      releaseSourceLock();
+    }
+    try { streamController?.error(reason); } catch { /* stream already closed */ }
+    finish();
+  };
   const limited = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    },
     async pull(controller) {
-      const { done, value } = await source.read();
-      if (done) {
-        controller.close();
-        return;
+      try {
+        const { done, value } = await source.read();
+        if (lifecycle.finished) return;
+        if (done) {
+          controller.close();
+          releaseSourceLock();
+          finish();
+          return;
+        }
+        seen += value.byteLength;
+        if (enforcesLimit && seen > limit) {
+          const error = new HttpError(`Response body exceeds maxBodySize (${seen} > ${limit})`, {
+            code: 'ERR_MAX_BODY_SIZE',
+          });
+          void source.cancel(error).catch(() => undefined).finally(releaseSourceLock);
+          controller.error(error);
+          finish();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        if (!lifecycle.finished) {
+          controller.error(error);
+          releaseSourceLock();
+          finish();
+        }
       }
-      seen += value.byteLength;
-      if (seen > limit) {
-        const error = new HttpError(`Response body exceeds maxBodySize (${seen} > ${limit})`, {
-          code: 'ERR_MAX_BODY_SIZE',
-        });
-        void source.cancel(error).catch(() => undefined);
-        controller.error(error);
-        return;
-      }
-      controller.enqueue(value);
     },
     cancel(reason) {
-      return source.cancel(reason);
+      let canceled: Promise<void>;
+      try {
+        canceled = source.cancel(reason);
+      } catch (error) {
+        releaseSourceLock();
+        finish();
+        throw error;
+      }
+      finish();
+      return canceled.finally(releaseSourceLock);
     },
   });
   const wrapped = new Response(limited, {
@@ -287,6 +363,8 @@ function limitRawResponse(response: Response, maxBodySize?: number): Response {
       Object.defineProperty(wrapped, key, { value, configurable: true, enumerable: true });
     } catch { /* a runtime may expose these as non-configurable getters */ }
   }
+  markResponseMethod(wrapped, responseMethod(response));
+  RAW_RESPONSE_LIFECYCLES.set(wrapped, lifecycle);
   return wrapped;
 }
 
@@ -297,7 +375,7 @@ export async function readResponse(
   parseJson: JsonParser = (text) => JSON.parse(text),
   signal?: AbortSignal,
 ): Promise<unknown | undefined> {
-  if (type === 'response') return limitRawResponse(response, maxBodySize);
+  if (type === 'response') return limitRawResponse(response, maxBodySize, signal);
   // No payload at all: 204/205/304 and HEAD. Distinct from a JSON `null` body,
   // which is a real value that schema validation must still see.
   if (carriesNoPayload(response)) return undefined;

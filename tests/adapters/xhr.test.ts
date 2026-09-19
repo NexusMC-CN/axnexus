@@ -64,7 +64,10 @@ test('xhr adapter maps binary response type and credentials', async () => {
     open() { this.readyState = 1; }
     setRequestHeader() {}
     getAllResponseHeaders() { return 'content-type: application/octet-stream\r\n'; }
-    send() { this.readyState = 4; this.onreadystatechange?.(); }
+    send() {
+      this.readyState = 4;
+      this.onreadystatechange?.();
+    }
     abort() { this.onabort?.(); }
   }
   const original = globalThis.XMLHttpRequest;
@@ -98,7 +101,11 @@ test('xhr adapter treats status zero as a network error', async () => {
     open() { this.readyState = 1; }
     setRequestHeader() {}
     getAllResponseHeaders() { return ''; }
-    send() { this.readyState = 4; this.onreadystatechange?.(); }
+    send() {
+      this.readyState = 4;
+      this.onreadystatechange?.();
+      this.onerror?.();
+    }
     abort() { this.onabort?.(); }
   }
   const original = globalThis.XMLHttpRequest;
@@ -141,6 +148,44 @@ test('issue 24: xhr adapter classifies a core timeout abort as ETIMEDOUT', async
     } as never);
     controller.abort({ code: 'ETIMEDOUT', name: 'TimeoutError' });
     await assert.rejects(pending, (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ETIMEDOUT');
+  } finally {
+    globalThis.XMLHttpRequest = original;
+  }
+});
+
+test('issue 24: xhr adapter preserves the native timeout event after readyState status zero', async () => {
+  class NativeTimeoutXHR {
+    upload = {};
+    onreadystatechange: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    ontimeout: (() => void) | null = null;
+    readyState = 0;
+    status = 0;
+    statusText = '';
+    responseType = '';
+    response = '';
+    timeout = 0;
+    open() { this.readyState = 1; }
+    setRequestHeader() {}
+    getAllResponseHeaders() { return ''; }
+    send() {
+      this.readyState = 4;
+      this.onreadystatechange?.();
+      this.ontimeout?.();
+    }
+    abort() { this.onabort?.(); }
+  }
+  const original = globalThis.XMLHttpRequest;
+  globalThis.XMLHttpRequest = NativeTimeoutXHR as never;
+  try {
+    await assert.rejects(
+      createXhrAdapter()({
+        url: 'https://example.test', method: 'GET', headers: new Headers(), timeout: 10,
+      } as never),
+      (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ETIMEDOUT',
+    );
   } finally {
     globalThis.XMLHttpRequest = original;
   }

@@ -5,6 +5,7 @@ import { AxiosHeaders } from '../headers/headers.js';
 import { mergeMethodHeaders, type HeaderDefaults } from '../headers/methods.js';
 import type { RateLimitOptions } from '../transfer/rate-limiter.js';
 import { encodeBody } from '../utils/body.js';
+import { signalReason } from './control.js';
 import type {
   HttpAdapter,
   HttpClientConfig,
@@ -76,10 +77,14 @@ export async function applyRequestTransforms(
   value: unknown,
   transforms: RequestConfig['transformRequest'],
   headers: Headers,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const list = transforms ? (Array.isArray(transforms) ? transforms : [transforms]) : [];
   let current = value;
-  for (const transform of list) current = await transform(current, headers);
+  for (const transform of list) {
+    if (signal?.aborted) throw signalReason(signal);
+    current = await transform(current, headers);
+  }
   return current;
 }
 
@@ -87,10 +92,14 @@ export async function applyResponseTransforms(
   value: unknown,
   transforms: RequestConfig['transformResponse'],
   response: Response,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const list = transforms ? (Array.isArray(transforms) ? transforms : [transforms]) : [];
   let current = value;
-  for (const transform of list) current = await transform(current, response);
+  for (const transform of list) {
+    if (signal?.aborted) throw signalReason(signal);
+    current = await transform(current, response);
+  }
   return current;
 }
 
@@ -100,6 +109,7 @@ export async function createResolvedConfig(
   requestIdEnabled: boolean | (() => string),
   applyTransforms = true,
   headersAlreadyMerged = false,
+  signal?: AbortSignal,
 ): Promise<ResolvedRequestConfig> {
   const method = String(request.method || 'GET').toUpperCase();
   const baseURL = request.baseURL ?? defaults.baseURL ?? '';
@@ -135,8 +145,9 @@ export async function createResolvedConfig(
   let transformedData = request.data;
   if (applyTransforms && Object.prototype.hasOwnProperty.call(request, 'data')) {
     try {
-      transformedData = await applyRequestTransforms(request.data, requestTransforms, headers);
+      transformedData = await applyRequestTransforms(request.data, requestTransforms, headers, signal);
     } catch (cause) {
+      if (signal?.aborted) throw cause;
       throw new HttpError('Request transform failed', {
         code: 'ERR_TRANSFORM_REQUEST',
         cause,

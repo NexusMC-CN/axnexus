@@ -14,6 +14,7 @@ import {
 } from './config.js';
 import { combineSignals, raceWithSignal, signalReason, sleep, TIMEOUT_REASON } from './control.js';
 import { HttpError, toError } from './errors.js';
+import { cancelBody, deferResponseBodyCleanup } from '../utils/response.js';
 import {
   calculateRetryDelay,
   DEFAULT_RETRY_ON,
@@ -59,6 +60,7 @@ export async function runRequestPipeline<T>(
   let stableRequestId = '';
   let generatedRequestIdForCache: string | undefined;
   let notified = false;
+  let setupCleanupResponse: Response | undefined;
   // Setup hooks run before the per-attempt controller exists. Keep a
   // cancellation race around that phase so a caller can stop a pending
   // interceptor or request transform as well as an adapter attempt.
@@ -117,7 +119,7 @@ export async function runRequestPipeline<T>(
     ]);
     try {
       resolved = await raceWithSignal(
-        createResolvedConfig(defaults, interceptedConfig, false, true, true),
+        createResolvedConfig(defaults, interceptedConfig, false, true, true, resolvedSetupSignals.signal),
         resolvedSetupSignals.signal,
       );
     } finally {
@@ -193,7 +195,7 @@ export async function runRequestPipeline<T>(
             ]);
             try {
               resolved = await raceWithSignal(
-                createResolvedConfig(defaults, retryInput, false, true, true),
+                createResolvedConfig(defaults, retryInput, false, true, true, retryConfigSignals.signal),
                 retryConfigSignals.signal,
               );
             } finally {
@@ -224,12 +226,13 @@ export async function runRequestPipeline<T>(
           attemptResolved.signal,
           attemptResolved.rateLimit?.signal,
         ]);
+        let completedResponse: HttpResponse<unknown> | undefined;
         try {
           try {
             // Every attempt — including retries — passes back through the rate
             // limiter. Reserving the slot once for the whole retry loop would
             // let automatic retries exceed `requestsPerInterval`.
-            return await rateLimiter.run((releaseSlot) => executeAttempt({
+            completedResponse = await rateLimiter.run((releaseSlot) => executeAttempt({
               adapter,
               config: attemptResolved,
               defaults,
@@ -251,6 +254,7 @@ export async function runRequestPipeline<T>(
               ...(attemptResolved.rateLimit ?? {}),
               signal: attemptSignals.signal,
             });
+            return completedResponse;
           } catch (error) {
             const normalized = error instanceof HttpError
               ? error
@@ -292,7 +296,9 @@ export async function runRequestPipeline<T>(
             }
           }
         } finally {
-          attemptSignals.cleanup();
+          if (!deferResponseBodyCleanup(completedResponse?.raw, attemptSignals.cleanup)) {
+            attemptSignals.cleanup();
+          }
         }
       }
       throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: initialResolved });
@@ -306,6 +312,8 @@ export async function runRequestPipeline<T>(
       requestInterceptorCount: requestInterceptors.getHandlers().length,
       responseInterceptorCount: responseInterceptors.getHandlers().length,
       defaultRetry: defaults.retry,
+      defaultRetryOn: defaults.retryOn,
+      defaultRetryDelay: defaults.retryDelay,
     });
     // Scheduling now happens per attempt inside `perform`, so a retry cannot
     // bypass `requestsPerInterval` by reusing the original reservation.
@@ -313,11 +321,23 @@ export async function runRequestPipeline<T>(
     // if local response parsing/validation then fails. Cache invalidation must
     // therefore be driven by the method, not by the whole request succeeding.
     const invalidatesCache = initialResolved.method !== 'GET';
+    let pipelineCleanupResponse: Response | undefined;
     try {
       const result = cachePolicy.enabled
         ? await cache.getOrLoad(cachePolicy.key!, cachePolicy.ttl, async () => (await perform()).data)
         : await perform();
       if (invalidatesCache) cache.clear();
+      if (!cachePolicy.enabled && initialResolved.responseType === 'response') {
+        const response = result as HttpResponse<unknown>;
+        // A full HttpResponse exposes `.raw`; the value-only API exposes the
+        // body only when response transforms/interceptors kept that Response.
+        if (fullResponse || response.data === response.raw) {
+          pipelineCleanupResponse = response.raw;
+          setupCleanupResponse = response.raw;
+        } else {
+          cancelBody(response.raw);
+        }
+      }
       if (fullResponse) return result as HttpResponse<T>;
       return cachePolicy.enabled ? result as T : (result as HttpResponse<T>).data;
     } catch (error) {
@@ -342,12 +362,15 @@ export async function runRequestPipeline<T>(
       }
       throw error;
     } finally {
-      if (totalTimer) clearTimeout(totalTimer);
-      overallSignal.cleanup();
-      // Adapters that keep an internal cancellation listener must drop it once
-      // the pipeline is done; otherwise a long-lived caller signal accumulates
-      // listeners for every completed request.
-      releaseAdapterStream?.();
+      const cleanup = () => {
+        if (totalTimer) clearTimeout(totalTimer);
+        overallSignal.cleanup();
+        // Adapters that keep an internal cancellation listener must drop it once
+        // the pipeline is done; otherwise a long-lived caller signal accumulates
+        // listeners for every completed request.
+        releaseAdapterStream?.();
+      };
+      if (!deferResponseBodyCleanup(pipelineCleanupResponse, cleanup)) cleanup();
     }
   } catch (error) {
     let fallbackConfig = resolved;
@@ -379,6 +402,8 @@ export async function runRequestPipeline<T>(
     notifyError(normalized);
     throw normalized;
   } finally {
-    setupSignals.cleanup();
+    if (!deferResponseBodyCleanup(setupCleanupResponse, setupSignals.cleanup)) {
+      setupSignals.cleanup();
+    }
   }
 }

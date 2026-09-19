@@ -1,5 +1,11 @@
 import { AxiosHeaders } from '../headers/headers.js';
-import { readErrorPayload, markResponseMethod, readResponse } from '../utils/response.js';
+import {
+  cancelBody,
+  deferResponseBodyCleanup,
+  readErrorPayload,
+  markResponseMethod,
+  readResponse,
+} from '../utils/response.js';
 import { applyResponseTransforms } from './config.js';
 import { combineSignals, raceWithSignal, signalReason, TIMEOUT_REASON } from './control.js';
 import { responseInterceptorError, toError, HttpError } from './errors.js';
@@ -104,6 +110,13 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
   }
   const startedAt = Date.now();
   let responseInterceptorChainStarted = false;
+  let rawBodyResponse: Response | undefined;
+  let returnedRawBody: Response | undefined;
+  const keepsRawBody = (value: unknown): boolean => {
+    if (!rawBodyResponse || !value || typeof value !== 'object') return false;
+    const candidate = value as { data?: unknown; raw?: unknown };
+    return candidate.data === rawBodyResponse || candidate.raw === rawBodyResponse;
+  };
   try {
     // Abort listeners do not fire when attached to an already-aborted signal.
     // Check explicitly before invoking an adapter so a replacement signal
@@ -174,6 +187,9 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
       config.parseJson,
       attemptConfig.signal,
     );
+    if (config.responseType === 'response' && data instanceof Response) {
+      rawBodyResponse = data;
+    }
     // `undefined` means the response carried no payload at all (204/HEAD/empty
     // body). An explicit JSON `null` is a real value and must still be
     // validated, so it is not treated as "no data". The public client contract
@@ -195,7 +211,12 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     let transformedData: unknown;
     try {
       transformedData = await raceWithSignal(
-        applyResponseTransforms(validatedData, config.transformResponse ?? defaults.transformResponse, rawResponse),
+        applyResponseTransforms(
+          validatedData,
+          config.transformResponse ?? defaults.transformResponse,
+          rawResponse,
+          attemptConfig.signal,
+        ),
         attemptConfig.signal,
       );
     } catch (cause) {
@@ -212,7 +233,7 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
       statusText: rawResponse.statusText,
       headers: new AxiosHeaders(rawResponse.headers),
       config: attemptConfig,
-      raw: rawResponse,
+      raw: rawBodyResponse ?? rawResponse,
       protocol: metadata?.protocol ?? 'unknown',
       timings: {
         queuedAt,
@@ -225,13 +246,15 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
       },
     };
     responseInterceptorChainStarted = true;
-    return await raceWithSignal(
+    const interceptedResponse = await raceWithSignal(
       applyInterceptorChain(responseInterceptors, response, {
         reverse: true,
         signal: attemptConfig.signal,
       }),
       attemptConfig.signal,
     );
+    if (keepsRawBody(interceptedResponse)) returnedRawBody = rawBodyResponse;
+    return interceptedResponse;
   } catch (error) {
     if (responseInterceptorChainStarted) {
       // `applyInterceptorChain` already traverses rejected handlers after a
@@ -258,7 +281,10 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
         applyInterceptorErrorChain(responseInterceptors, normalized, { reverse: true }),
         attemptConfig.signal,
       );
-      if ((recovered as unknown) !== normalized) return recovered;
+      if ((recovered as unknown) !== normalized) {
+        if (keepsRawBody(recovered)) returnedRawBody = rawBodyResponse;
+        return recovered;
+      }
     } catch (rejectedError) {
       if (attemptConfig.signal?.aborted) {
         // Preserve timeout/cancellation classification when the error
@@ -283,8 +309,12 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     }
     throw normalized;
   } finally {
-    if (timer) clearTimeout(timer);
-    if (externalSignal && controller) externalSignal.removeEventListener('abort', onAbort);
-    attemptSignals.cleanup();
+    if (rawBodyResponse && !returnedRawBody) cancelBody(rawBodyResponse);
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (externalSignal && controller) externalSignal.removeEventListener('abort', onAbort);
+      attemptSignals.cleanup();
+    };
+    if (!deferResponseBodyCleanup(returnedRawBody, cleanup)) cleanup();
   }
 }

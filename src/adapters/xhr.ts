@@ -78,16 +78,13 @@ export function createXhrAdapter(): HttpAdapterFactory {
     };
     const finish = () => {
       if (settled || xhr.readyState !== 4) return;
-      // `xhr.status` is 0 for a canceled/timeout request too. Leave those to
-      // the dedicated handlers so a native timeout is not reported as a
-      // retryable network failure; only report ERR_NETWORK for a genuine
-      // transport failure that produced no status at all.
+      // The XHR request-error steps dispatch readystatechange before the
+      // dedicated error/abort/timeout event. Status 0 therefore cannot be
+      // classified here without racing and replacing the real failure kind.
       if (xhr.status === 0) {
         if (signal?.aborted) {
           fail(abortError(signal));
-          return;
         }
-        fail(new HttpError('Network request failed', { code: 'ERR_NETWORK', retryable: true }));
         return;
       }
       const status = xhr.status === 1223 ? 204 : xhr.status;

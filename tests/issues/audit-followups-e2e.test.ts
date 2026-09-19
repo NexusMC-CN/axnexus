@@ -75,3 +75,61 @@ test('e2e: a client-level maxBodySize null means unlimited', async () => {
   assert.equal(response instanceof Response, true);
   assert.equal(await response.text(), '12345');
 });
+
+test('issue 4: aborting after a raw response is returned cancels its pending body read', async () => {
+  const requestController = new AbortController();
+  let sourceCanceled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('first'));
+    },
+    cancel() {
+      sourceCanceled = true;
+    },
+  });
+  const client = createHttpClient({
+    adapter: async () => new Response(body, { status: 200 }),
+  });
+
+  const response = await client.get<Response>('/raw-abort', {
+    responseType: 'response',
+    signal: requestController.signal,
+  } as never);
+  const reader = response.body!.getReader();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), 'first');
+
+  const pendingRead = reader.read();
+  requestController.abort(new DOMException('cancel raw response', 'AbortError'));
+  try {
+    await assert.rejects(
+      Promise.race([
+        pendingRead,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('raw body read did not abort')), 100)),
+      ]),
+      (error: unknown) => (error as { name?: string }).name === 'AbortError',
+    );
+    assert.equal(sourceCanceled, true, 'aborting the request must cancel the transport body');
+  } finally {
+    try { await reader.cancel(); } catch { /* already aborted */ }
+  }
+});
+
+test('issue 4: cancelling a returned raw body cancels its transport source', async () => {
+  let canceledWith: unknown;
+  const client = createHttpClient({
+    adapter: async () => new Response(new ReadableStream<Uint8Array>({
+      cancel(reason) {
+        canceledWith = reason;
+      },
+    }), { status: 200 }),
+  });
+
+  const response = await client.get<Response>('/raw-cancel', {
+    responseType: 'response',
+    maxBodySize: 1024,
+  } as never);
+  const reason = new Error('consumer stopped reading');
+  await response.body!.cancel(reason);
+
+  assert.equal(canceledWith, reason);
+});

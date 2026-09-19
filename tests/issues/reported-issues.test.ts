@@ -639,13 +639,22 @@ test('issue 36: the CSRF interceptor refreshes its own token on a retry', async 
   assert.equal(secondHeaders.get('x-csrf-token'), 'new-token');
 });
 
-// #40 — method-grouped headers do not leak across methods for fetchJson.
-test('issue 40: an unrelated method group does not supply the request header', () => {
-  const headers = mergeMethodHeaders(undefined, 'GET', {
-    get: { Authorization: 'Bearer read-token' },
-    post: { Authorization: 'Bearer write-token' },
+// #40 — exercise the public helper rather than only the lower-level merge.
+test('issue 40: fetchJson sends only the active method header group', async () => {
+  const { fetchJson } = await import('../../dist/server/json.js');
+  let seen: Headers | undefined;
+  await fetchJson('/method-headers', {
+    method: 'GET',
+    headers: {
+      get: { Authorization: 'Bearer read-token' },
+      post: { Authorization: 'Bearer write-token' },
+    } as never,
+    fetch: (async (_url, init) => {
+      seen = new Headers(init?.headers);
+      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    }) as never,
   });
-  assert.equal(headers.get('Authorization'), 'Bearer read-token');
+  assert.equal(seen?.get('authorization'), 'Bearer read-token');
 });
 
 // #56 — a cross-realm ArrayBuffer is uploaded as bytes, not JSON.

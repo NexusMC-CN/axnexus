@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HttpError, RateLimiter, createHttpClient } from '../../dist/index.js';
 import { createNodeHttp2Adapter } from '../../dist/adapters/node-http2.js';
+import { cacheKey, resolveCachePolicy } from '../../dist/core/cache-policy.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -64,6 +65,46 @@ test('issue 8: an HTTP/2 upload waits for drain under backpressure', async () =>
   assert.equal(result.response.status, 200);
 });
 
+for (const ending of ['drain', 'abort', 'close', 'error'] as const) {
+  test(`issue 8: HTTP/2 drain listeners are removed after ${ending}`, async () => {
+    const session = new ScriptedSession();
+    const controller = new AbortController();
+    const adapter = createNodeHttp2Adapter({
+      module: { connect: () => session, constants: { NGHTTP2_CANCEL: 8 } },
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(new Uint8Array([1]));
+        streamController.close();
+      },
+    });
+    const pending = adapter({
+      url: 'https://example.test/backpressure-cleanup',
+      method: 'POST',
+      headers: new Headers(),
+      body,
+      signal: controller.signal,
+    } as never);
+    await waitUntil(() => session.streams[0]?.listenerCount('drain') === 1);
+    const stream = session.streams[0];
+
+    if (ending === 'drain') {
+      stream.emit('drain');
+      await waitUntil(() => stream.listenerCount('drain') !== 1);
+      assert.deepEqual(listenerCounts(stream), { drain: 0, close: 1, error: 1 });
+      stream.emit('response', { ':status': 200 });
+      stream.emit('end');
+      await pending;
+    } else {
+      if (ending === 'abort') controller.abort(new DOMException('stop', 'AbortError'));
+      else if (ending === 'close') stream.emit('close');
+      else stream.emit('error', new Error('write failed'));
+      await assert.rejects(pending);
+      assert.deepEqual(listenerCounts(stream), { drain: 0, close: 1, error: 1 });
+    }
+  });
+}
+
 // #30 — concurrent GET de-duplication must not impose another caller's retry.
 test('issue 30: a shared GET load does not borrow another caller retry policy', async () => {
   // If the two callers shared a single load, the non-retrying caller would
@@ -104,6 +145,74 @@ test('issue 30: a shared GET load does not borrow another caller retry policy', 
       assert.equal('error' in plainResult, true);
     }
   }
+});
+
+test('issue 30: standalone retryOn and retryDelay change cache identity and eligibility', () => {
+  const base = {
+    url: 'https://example.test/shared', method: 'GET', headers: new Headers(), cache: true, retry: 1,
+  } as never;
+  const retryOnA = { ...base, retryOn: [] };
+  const retryOnB = { ...base, retryOn: [503] };
+  const retryDelayA = { ...base, retryDelay: 0 };
+  const retryDelayB = { ...base, retryDelay: 1000 };
+  const policy = (config: never) => resolveCachePolicy({
+    config,
+    defaultCache: true,
+    fullResponse: false,
+    requestInterceptorCount: 0,
+    responseInterceptorCount: 0,
+    defaultRetry: 1,
+  });
+
+  assert.equal(policy(retryOnA).enabled, false);
+  assert.equal(policy(retryOnB).enabled, false);
+  assert.notEqual(cacheKey(retryOnA), cacheKey(retryOnB));
+  assert.equal(policy(retryDelayA).enabled, false);
+  assert.equal(policy(retryDelayB).enabled, false);
+  assert.notEqual(cacheKey(retryDelayA), cacheKey(retryDelayB));
+});
+
+test('issue 30: concurrent GETs with standalone retryOn do not share attempts', async () => {
+  let calls = 0;
+  const client = createHttpClient({
+    cache: true,
+    retry: 1,
+    retryDelay: 0,
+    adapter: async () => {
+      calls += 1;
+      await new Promise((resolve) => setImmediate(resolve));
+      return calls <= 2 ? jsonResponse({ retry: true }, 503) : jsonResponse({ ok: true });
+    },
+  });
+
+  const [withoutRetry, withRetry] = await Promise.allSettled([
+    client.get('/retry-on-isolation', { retryOn: [] } as never),
+    client.get('/retry-on-isolation', { retryOn: [503] } as never),
+  ]);
+  assert.equal(withoutRetry.status, 'rejected');
+  assert.equal(withRetry.status, 'fulfilled');
+  assert.equal(calls, 3);
+});
+
+test('issue 30: concurrent GETs with standalone retryDelay do not share attempts', async () => {
+  let calls = 0;
+  const client = createHttpClient({
+    cache: true,
+    retry: 1,
+    retryOn: [503],
+    adapter: async () => {
+      const call = ++calls;
+      await new Promise((resolve) => setImmediate(resolve));
+      return call <= 2 ? jsonResponse({ retry: true }, 503) : jsonResponse({ ok: true });
+    },
+  });
+
+  const results = await Promise.all([
+    client.get('/retry-delay-isolation', { retryDelay: 0 } as never),
+    client.get('/retry-delay-isolation', { retryDelay: 10 } as never),
+  ]);
+  assert.deepEqual(results, [{ ok: true }, { ok: true }]);
+  assert.equal(calls, 4);
 });
 
 // #47 — a failed serialization must not run the same serializer twice.
@@ -178,6 +287,16 @@ class ScriptedStream {
     return this;
   }
 
+  off(event: string, listener: (...args: unknown[]) => void): this {
+    const list = this.listeners.get(event) ?? [];
+    this.listeners.set(event, list.filter((candidate) => candidate !== listener));
+    return this;
+  }
+
+  listenerCount(event: string): number {
+    return this.listeners.get(event)?.length ?? 0;
+  }
+
   emit(event: string, ...args: unknown[]): void {
     for (const listener of [...(this.listeners.get(event) ?? [])]) listener(...args);
   }
@@ -200,4 +319,20 @@ class ScriptedStream {
   close(): void { /* no-op */ }
   pause(): void { /* no-op */ }
   resume(): void { /* no-op */ }
+}
+
+function listenerCounts(stream: ScriptedStream): { drain: number; close: number; error: number } {
+  return {
+    drain: stream.listenerCount('drain'),
+    close: stream.listenerCount('close'),
+    error: stream.listenerCount('error'),
+  };
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail('condition was not reached');
 }

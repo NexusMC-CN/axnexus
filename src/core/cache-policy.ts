@@ -1,4 +1,4 @@
-import type { CacheOptions, ResolvedRequestConfig } from './types.js';
+import type { CacheOptions, ResolvedRequestConfig, RetryDelay } from './types.js';
 
 export interface CachePolicyInput {
   config: ResolvedRequestConfig;
@@ -8,6 +8,30 @@ export interface CachePolicyInput {
   requestInterceptorCount: number;
   responseInterceptorCount: number;
   defaultRetry?: number | import('./types.js').RetryOptions;
+  defaultRetryOn?: number[];
+  defaultRetryDelay?: RetryDelay;
+}
+
+function retryOnMatchesDefault(value: number[] | undefined, fallback: number[] | undefined): boolean {
+  if (value === undefined) return fallback === undefined;
+  if (fallback === undefined) return false;
+  const normalizedValue = normalizedRetryOn(value);
+  const normalizedFallback = normalizedRetryOn(fallback);
+  if (normalizedValue.length !== normalizedFallback.length) return false;
+  return normalizedValue.every((status, index) => status === normalizedFallback[index]);
+}
+
+function retryDelayMatchesDefault(value: RetryDelay | undefined, fallback: RetryDelay | undefined): boolean {
+  return value === fallback;
+}
+
+function normalizedRetryOn(value: number[] | undefined): number[] {
+  return [...new Set((value ?? []).filter(Number.isFinite))].sort((a, b) => a - b);
+}
+
+function retryDelayKey(value: RetryDelay | undefined): number | string {
+  if (typeof value === 'function') return 'function';
+  return value ?? '';
 }
 
 export interface CachePolicy {
@@ -58,6 +82,8 @@ export function cacheKey(config: ResolvedRequestConfig, generatedRequestId?: str
     fetchCache: config.fetchCache ?? config.requestCache ?? '',
     priority: config.priority ?? '',
     window: config.window === undefined ? '' : config.window,
+    retryOn: normalizedRetryOn(config.retryOn),
+    retryDelay: retryDelayKey(config.retryDelay),
     headers: headerEntries,
   });
 }
@@ -98,6 +124,8 @@ export function resolveCachePolicy(input: CachePolicyInput): CachePolicy {
     // would impose that caller's retry limit, delay and hooks on this one, so
     // requests that differ in retry behaviour must not share a load.
     && retryConfigIsDefault(config, input.defaultRetry)
+    && retryOnMatchesDefault(config.retryOn, input.defaultRetryOn)
+    && retryDelayMatchesDefault(config.retryDelay, input.defaultRetryDelay)
     && config.body === undefined;
   if (!enabled) return { enabled: false, ttl: 0 };
   const ttl = typeof cacheSetting === 'object' ? Math.max(0, Number(cacheSetting.ttl) || 0) : 0;
