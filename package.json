@@ -1,7 +1,26 @@
 {
-  "name": "axnexus",
+  "name": "@nexusmc-cn/axnexus",
   "version": "0.1.0",
   "description": "A small, typed, fetch-based HTTP client with Axios-style instances.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NexusMC-CN/axnexus.git"
+  },
+  "homepage": "https://github.com/NexusMC-CN/axnexus#readme",
+  "bugs": {
+    "url": "https://github.com/NexusMC-CN/axnexus/issues"
+  },
+  "keywords": [
+    "http",
+    "fetch",
+    "typescript",
+    "http-client"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

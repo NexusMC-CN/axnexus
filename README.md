@@ -4,7 +4,7 @@
 
 ## 特性
 
-- 零运行时依赖，支持现代浏览器、Node.js 18+ 和 Bun（根入口已在 Bun 1.4.2 验证）。
+- 零运行时依赖，面向现代浏览器、Node.js 18+ 和提供标准 Web API 的 Bun 运行环境。
 - 提供 `get`、`head`、`options`、`trace`、`connect`、`post`、`put`、`patch`、`delete` 和通用 `request` 方法。
 - 自动处理 JSON、文本、`Blob`、`ArrayBuffer`、`FormData` 和 `Response`。
 - 支持请求/响应拦截器、请求 ID、超时、`AbortSignal` 和可配置重试。
@@ -13,24 +13,24 @@
 - 提供可独立使用的 stale-while-revalidate 响应缓存和 SSR/middleware `fetchJson`。
 - `AxiosHeaders` 支持大小写不敏感读写、规范化、合并、迭代和 method shortcut。
 - Fetch 下载进度、XHR 上传进度、响应大小限制和完整 response metadata。
-- 提供有界并发分块上传编排器，不绑定 AVMCBBS 的上传端点协议。
+- 提供有界并发分块上传编排器，可接入自定义上传协议。
 - 按客户端/资源组调度的并发、优先级、请求频率和队列超时限制。
-- 提供脱敏后的请求生命周期日志适配器，不输出 Cookie 和 Authorization 原文。
+- 提供请求生命周期日志适配器，默认脱敏 Cookie 和 Authorization 等敏感请求头。
 - 可选 Node HTTP/2 adapter，以及只通过注入 transport 启用的 HTTP/3 adapter。
 - CSRF 通过显式拦截器接入，不修改全局 `fetch`，不读取页面 Cookie。
-
-这个包只负责通用 HTTP 传输，不包含 AVMCBBS 的业务 API、认证弹窗、站点配置或上传端点协议。
 
 ## 安装
 
 ```bash
-npm install axnexus
+npm install @nexusmc-cn/axnexus
 ```
+
+包以 ESM 发布，使用 `import` 引入，并内置 TypeScript 类型声明。API 采用实例、拦截器和 `AxiosHeaders` 风格，便捷请求方法默认直接返回解析后的数据。
 
 ## 快速开始
 
 ```typescript
-import { createHttpClient } from 'axnexus';
+import { createHttpClient } from '@nexusmc-cn/axnexus';
 
 const http = createHttpClient({
   baseURL: 'https://api.example.com/v1',
@@ -48,12 +48,12 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 
 默认凭据策略是 `include`，默认自动添加 `Accept: application/json` 和 `X-Request-Id`。调用方显式传入同名请求头时会保留调用方的值。
 
-`include` 会让浏览器跨源请求主动携带凭据，服务端必须正确配置 CORS 和 `Access-Control-Allow-Credentials`；需要原生 Fetch 的 `same-origin` 行为时请显式传入 `credentials`。
+`include` 允许浏览器跨源请求携带凭据，服务端必须正确配置 CORS 和 `Access-Control-Allow-Credentials`；需要原生 Fetch 的 `same-origin` 行为时请显式传入 `credentials`。
 
 ## Headers
 
 ```typescript
-import { AxiosHeaders } from 'axnexus';
+import { AxiosHeaders } from '@nexusmc-cn/axnexus';
 
 const headers = new AxiosHeaders({ Authorization: 'Bearer token' });
 headers.setAccept('application/json');
@@ -83,7 +83,7 @@ const result = await http.get('/items', {
 
 `params` 使用 `URLSearchParams` 编码，数组会生成重复的 query key，`null` 和 `undefined` 会被跳过。相对路径会与 `baseURL` 合并；如果不允许绝对 URL，可以设置 `allowAbsoluteURL: false`。
 
-客户端缓存使用 `cache: { ttl }` 或 `cache: false`；如果需要把原生 Fetch 的缓存模式传给 adapter，请使用 `fetchCache`（或等价的 `requestCache`），例如 `fetchCache: 'no-store'`。Node Fetch 的 `dispatcher`/`agent`/`duplex` 只在 Node 运行时透传，标准 `priority` 和 `window` 则按运行环境透传；Bun 的专有 Fetch 选项不会自动混入通用配置。
+客户端缓存使用 `cache: { ttl }` 或 `cache: false`；如果需要把原生 Fetch 的缓存模式传给 adapter，请使用 `fetchCache`（或等价的 `requestCache`），例如 `fetchCache: 'no-store'`。`dispatcher` 和 `agent` 只在 Node 运行时透传；`duplex`、`priority` 和 `window` 按运行环境支持情况使用。`ReadableStream` 请求体会自动设置 `duplex: 'half'`，Bun 的专有 Fetch 选项不会自动混入通用配置。
 
 普通对象、数组、数字、布尔值和 `null` 会自动 JSON 序列化。字符串、`FormData`、`Blob`、`ArrayBuffer`、`URLSearchParams` 和其他 `BodyInit` 会原样传递。
 
@@ -99,13 +99,17 @@ const result = await http.get('/jobs/123', {
 });
 ```
 
-`timeout` 限制单次 adapter 尝试（也覆盖该次响应体读取），`totalTimeout` 从进入限速队列前开始计时，覆盖排队、响应体读取、重试等待和所有尝试。单次 `timeout` 与外部取消同时发生时，以先触发者为准；外部 `AbortSignal` 在总超时触发前取消时返回 `ERR_CANCELED`，总超时计时器已经触发时统一返回 `ETIMEDOUT`。带 `signal`、`timeout` 或 `totalTimeout` 的请求不会进入客户端 data cache，因此每个调用方的取消和截止时间都独立生效。
+除 `responseType: 'response'` 外，`204`、`205`、`304`、`HEAD` 和空响应体返回 `null`；JSON 或文本模式下，只有空白字符的响应也返回 `null`。`responseType: 'text'` 保留非空文本原样，`blob` 返回带响应 `Content-Type` 的 Blob，`arrayBuffer` 返回对应二进制值。HEAD 的 `Content-Length` 描述对应 GET 资源的大小，不作为实际下载字节或响应体大小处理。
 
-响应处理规则是固定的：`204`、`205`、`304`、`HEAD`、`Content-Length: 0`、空字节以及只有空白字符的文本都返回 `null`。**响应体确实是 JSON `null` 时仍会执行 `schema` 校验**，因此「没有响应体」和「响应体是 `null`」不会被混为一谈；同理，校验器返回带 `issues` 的失败结果（即使 `issues` 为空数组）一律视为校验失败。`responseType: 'text'` 保留非空文本原样，`blob` 返回带响应 `Content-Type` 的 Blob，`arrayBuffer` 返回对应二进制值。HEAD 的 `Content-Length` 描述的是对应 GET 资源的大小，既不会按实际响应体执行 `maxBodySize` 校验，也不会上报为已下载字节。JSON（包括自定义 `parseJson`）解析失败会抛出 `ERR_BAD_PAYLOAD`，`transformResponse` 失败会抛出 `ERR_TRANSFORM_RESPONSE`，不会伪装成网络错误。错误状态的 payload 使用文本读取后尝试 JSON 解析，超过 `maxBodySize` 时 payload 置为 `null`，HTTP 错误本身仍保留状态码；被丢弃或未读完的响应体会被主动取消以释放连接。
+客户端和 `fetchJson` 都接受可选的 Standard Schema 校验器：解析后执行 `schema['~standard'].validate()`，校验失败抛出 `ERR_SCHEMA_VALIDATION`。客户端在校验通过后才运行 `transformResponse`；无需绑定 Zod、Valibot 等具体库。空响应跳过校验，JSON `null` 则仍然校验；校验器返回带 `issues` 的结果（包括空数组）都视为失败。
+
+JSON（包括自定义 `parseJson`）解析失败抛出 `ERR_BAD_PAYLOAD`，`transformResponse` 失败抛出 `ERR_TRANSFORM_RESPONSE`。错误状态的 payload 会按文本读取后尝试 JSON 解析，超过 `maxBodySize` 时置为 `null`，原始 HTTP 状态错误仍保留。被丢弃或未读完的响应体会主动取消，以释放连接。
 
 `validateStatus` 或 `throwHttpErrors` 回调自身抛错时返回 `ERR_INVALID_STATUS_POLICY`，并且不会当作可重试的网络错误重发请求。
 
-`maxBodySize` 会先检查响应的 `Content-Length`（HEAD 与 `204`/`205`/`304` 除外，它们本身没有响应体）；可读流按块累计，超过上限会立即停止读取、取消 reader 并取消底层响应体；没有可读流的响应只能在运行时完成缓冲后检查大小。`transformRequest` 和 `stringifyJson` 可用于接入自定义序列化协议，任一请求转换或序列化钩子失败都会抛出 `ERR_TRANSFORM_REQUEST`。
+`maxBodySize` 以字节为单位，默认不限制；负数、`NaN`、`Infinity` 及非数字值也按不限制处理。它会先检查响应的 `Content-Length`（HEAD 与 `204`/`205`/`304` 除外）；可读流按块累计，超过上限会立即停止读取并取消底层响应体；没有可读流的响应只能在运行时完成缓冲后检查大小。`responseType: 'response'` 返回的响应仍保留 `url`、`redirected` 和 `type` 等 metadata。
+
+`transformRequest` 和 `stringifyJson` 可用于接入自定义序列化协议，任一请求转换或序列化钩子失败都会抛出 `ERR_TRANSFORM_REQUEST`。
 
 ## FormData
 
@@ -124,7 +128,7 @@ const uploaded = await http.post<{ url: string }>('/upload', form);
 下载进度在 Fetch response body 可读时逐块报告；上传进度需要显式选择 XHR adapter：
 
 ```typescript
-import { createHttpClient, xhrAdapter } from 'axnexus';
+import { createHttpClient, xhrAdapter } from '@nexusmc-cn/axnexus';
 
 const browserHttp = createHttpClient({ adapter: xhrAdapter });
 await browserHttp.post('/upload', form, {
@@ -160,23 +164,25 @@ console.log(response.data, response.status, response.protocol, response.timings.
 
 可用方法为 `requestResponse`、`getResponse`、`headResponse`、`optionsResponse`、`traceResponse`、`connectResponse`、`postResponse`、`putResponse`、`patchResponse` 和 `deleteResponse`。完整响应不会进入 GET data cache；`responseType: 'response'` 在普通方法中仍返回原始 `Response`。
 
+返回原始 `Response` 时，调用方应读完或取消响应体，以释放连接；请求的取消、超时和传输资源清理会延续到响应体读取结束、失败或被取消。
+
 ### API 签名速查
 
 | API | 签名 |
 | --- | --- |
 | 创建实例 | `createHttpClient(config?: HttpClientConfig): HttpClient` |
 | 通用请求 | `request<T>(config)` 或 `request<T>(url, config?): Promise<T>` |
-| 完整响应 | `requestResponse<T>(config: RequestConfig): Promise<HttpResponse<T>>` |
+| 完整响应 | `requestResponse<T>(config)` 或 `requestResponse<T>(url, config?): Promise<HttpResponse<T>>` |
 | 便捷方法 | `get/head/options/trace/connect<T>(url, config?)`、`delete<T>(url, config?)` |
 | 带请求体方法 | `post<T, B>(url, data?, config?)`、`put<T, B>(...)`、`patch<T, B>(...)` |
 | 完整响应便捷方法 | `getResponse`、`headResponse`、`optionsResponse`、`traceResponse`、`connectResponse`、`postResponse`、`putResponse`、`patchResponse`、`deleteResponse` |
 
-完整字段类型以包导出的 `RequestConfig`、`HttpClientConfig`、`HttpResponse` 和 `HttpError` 为准；`dist/*.d.ts` 会随构建产物发布。
+完整字段类型以包导出的 `RequestConfig`、`HttpClientConfig`、`HttpResponse` 和 `HttpError` 为准。
 
 ## 错误处理
 
 ```typescript
-import { HttpError, isHttpError } from 'axnexus';
+import { isHttpError } from '@nexusmc-cn/axnexus';
 
 try {
   await http.get('/private');
@@ -192,117 +198,20 @@ try {
 
 | Code | 含义 |
 | --- | --- |
-| `ERR_BAD_RESPONSE` | 服务端返回非 2xx 状态 |
+| `ERR_BAD_RESPONSE` | HTTP 状态不满足状态策略，默认是非 2xx 状态 |
 | `ERR_NETWORK` | 网络层失败 |
 | `ETIMEDOUT` | 请求超过超时时间 |
 | `ERR_CANCELED` | 外部 `AbortSignal` 取消 |
 | `ERR_BAD_PAYLOAD` | 成功响应无法解析为 JSON |
 | `ERR_TRANSFORM_REQUEST` | 请求转换钩子抛出异常 |
 | `ERR_TRANSFORM_RESPONSE` | 响应转换钩子抛出异常 |
+| `ERR_SCHEMA_VALIDATION` | 响应未通过 Standard Schema 校验 |
 | `ERR_INVALID_HEADER` | header 名称或值包含非法字符 |
+| `ERR_INVALID_STATUS_POLICY` | 状态策略回调抛出异常 |
 | `ERR_MAX_BODY_SIZE` | 响应体超过 `maxBodySize` |
 | `ERR_RATE_LIMIT_QUEUE_TIMEOUT` | 请求在限速队列中超时 |
 | `ERR_UNSUPPORTED_ADAPTER` | 当前环境不支持所选 adapter |
 | `ERR_PROTOCOL_NEGOTIATION` | transport 无法协商请求的协议 |
-
-## 行为契约
-
-本节把几个容易被不同 adapter 或调用方式混淆的边界写成固定规则。它与导出的类型和测试一起构成公共 API 契约；业务项目不应依赖未列出的 adapter 私有细节。
-
-### 取消、超时与重试
-
-- `signal` 由调用方创建并传入请求配置。外部取消会返回 `ERR_CANCELED`，单次 `timeout` 会返回 `ETIMEDOUT`；同一请求中外部取消先发生时，取消优先于单次超时。
-- `timeout` 约束一次 adapter 尝试，包括响应体读取和响应拦截器等待；`totalTimeout` 还覆盖限速排队、重试判断、退避等待以及后续尝试。
-- 取消会尽早停止拦截器、`parseJson`/转换器、排队和 adapter 工作。adapter 已经把数据交给底层传输后，能否立刻停止仍取决于该 adapter 是否遵守 signal。
-- 重试策略使用本轮实际发送的 method/body 配置；错误对象里的 `error.config` 只用于诊断，不能作为是否可重试的依据。不可重放的 `ReadableStream` body 始终不自动重试。
-
-### `fetchJson` 的状态与解析
-
-`fetchJson` 和客户端都支持可选的 Standard Schema 响应校验：解析 JSON 后先执行 `schema['~standard'].validate()`，通过后才运行 `transformResponse`；失败会抛出 `ERR_SCHEMA_VALIDATION`，不绑定 Zod、Valibot 等具体库。
-
-`fetchJson` 遵循 Fetch 的状态语义，不会因为非 2xx 自动抛错：非 2xx、`204`、`Content-Length: 0`、空字节或只有空白字符的响应都返回 `null`。需要同时取得状态码和原始 `Response` 时使用 `fetchJsonResult`；它会返回 `{ data, status, response }`。
-
-成功状态的非空响应会交给 `parseJson`（默认 `JSON.parse`）。解析器抛错会转换为 `HttpError`，错误码为 `ERR_BAD_PAYLOAD`；`fetchJson` 的超时或外部 signal 取消仍按原生 `AbortError` 传播，不会转换成客户端请求使用的 `ETIMEDOUT` 或 `ERR_CANCELED`。`timeout` 和兼容 AVMCBBS 的 `timeoutMs` 都可用，二者同时提供时以 `timeoutMs` 为准。
-
-```typescript
-const result = await fetchJsonResult('/health', { timeout: 5_000 });
-if (result.status >= 400) {
-  // 非 2xx 不会自动抛错，状态码和原始 Response 仍在 result 中
-  console.warn('upstream status:', result.status);
-}
-```
-
-### 两层缓存与 clone
-
-客户端上的 `cache: { ttl }` 只提供 GET TTL 和进行中请求去重；独立的 `ResponseCache` 才提供 `staleWhileRevalidate`、`staleIfError` 和容量控制。两者不会共享条目，也不会把客户端的 signal、超时或进度事件吞进另一个调用方。
-
-```typescript
-const cache = new ResponseCache<{ items: string[] }>({ maxEntries: 128 });
-
-const value = await cache.getOrLoad('catalog', loadCatalog, {
-  ttl: 30_000,
-  staleWhileRevalidate: 120_000,
-  staleIfError: true,
-});
-```
-
-`ResponseCache` 当前的容量选项名是 `maxEntries`，表示最多保留的条目数，不是按字节计算的 `maxSize`；当前也没有公开的 `clone` 开关。写入和读取都会优先使用 `structuredClone`，再回退到 JSON clone；JSON fallback 可能丢失 `Date`、`Map` 等类型信息，两者都不支持的值会按原引用返回，因此缓存值仍应视为不可变数据。`maxEntries` 默认是 `256`。
-
-客户端 GET cache 的 key 使用最终 URL、method、响应类型、Fetch 行为选项和全部规范化请求头；只有客户端自动生成的 `X-Request-Id` 会被排除，调用方显式提供的同名 header 会参与区分。带 `signal`、`timeout`、`totalTimeout`、进度、限速或自定义解析/转换策略的请求会跳过这层 cache，所以它们不会加入另一个调用方的 in-flight 请求；直接使用 `GetRequestCache` 时，调用方的 `options.signal` 只取消自己的等待，不会取消共享 loader。`responseType: 'response'` 和完整响应方法也不进入 data cache。
-
-### `maxBodySize`
-
-`maxBodySize` 默认值是 `undefined`，表示不限制响应体大小；负数、`NaN`、`Infinity` 以及非数字值（如 `null`、`false`、`''`）也按“不限制”处理，只有真正的数字才会生效。若响应声明了有效的 `Content-Length`，会在读取前先检查；可读流会逐块累计，超过上限立即停止读取、取消 reader 并抛出 `ERR_MAX_BODY_SIZE`；没有可读流的响应只能在完成缓冲后检查。错误响应的 payload 读取超过上限时会置为 `null`，不会覆盖原始 HTTP 状态错误。`responseType: 'response'` 返回原始响应时会保留 `url`、`redirected` 和 `type`，因此读取最终 URL 或重定向链不受 `maxBodySize` 影响。
-
-### `uploadChunks` 的 signal、重试与进度
-
-`uploadChunks` 的 `options.signal` 是编排器级 signal，同一个 signal 会放到每个 `ChunkUploadPart.signal` 上。上传回调必须主动把它交给底层请求，编排器才能取消已经在途的网络操作：
-
-```typescript
-const controller = new AbortController();
-
-const pending = uploadChunks(bytes, {
-  chunkSize: 5 * 1024 * 1024,
-  concurrency: 3,
-  signal: controller.signal,
-  retry: 2,
-  upload: ({ index, body, signal }) => putPart(index, body, { signal }),
-});
-
-// 在用户取消动作中调用：停止尚未开始的分片、重试等待和遵守 signal 的在途上传
-controller.abort();
-const parts = await pending;
-```
-
-取消会阻止新分片和下一次重试，并让编排 Promise 尽快 reject；即使上传回调不响应 signal，编排器也不会继续等待它，但底层网络操作仍只能由回调自行取消。上传回调已经 resolve 后若 signal 已取消，该分片不会再写入结果或触发成功进度。`onProgress` 只统计成功分片，空 source 不产生进度事件；已成功的分片不会自动回滚，服务端清理和合并由上传协议负责。`retry` 只针对当前失败分片，重试会复用同一个 `body`，上传回调不应修改它；`part.end` 是 end-exclusive。`chunkSize` 和 `concurrency` 会向下取整为正整数，非有限或非正值回退为 `1`；`retryDelay` 的非有限或负值会回退为 `0`；需要严格参数校验时应在调用前自行完成。`onPartError`、`retryDelay` 或 `onProgress` 抛出的异常会使整体 Promise reject，但已经开始的其他上传不会被自动回滚。
-
-### 请求日志 record
-
-`createRequestLogger` 的 `RequestLogInput` 字段如下，未列出的字段不会由 logger 自动推断；`logger.record(input)` 是统一入口，会规范化 method、headers 并脱敏 error：
-
-| 字段 | 说明 |
-| --- | --- |
-| `phase` | `start`、`complete` 或 `error` |
-| `method` / `url` | 请求身份；`start` 会把 method 规范化为大写 |
-| `headers` | 规范化后的 header；默认脱敏 `authorization`、`cookie`、`set-cookie` |
-| `status` | 完成或错误时可选的 HTTP 状态码 |
-| `duration` | 生命周期句柄自动计算的毫秒数，也可在完成时显式提供 |
-| `responseBytes` | 可选的响应字节数 |
-| `error` | 错误摘要；`HttpError.config.headers` 和普通错误的任意附加字段都会被安全裁剪 |
-
-`start()` 返回的一次性句柄只结束它自己对应的生命周期；顶层 `logger.complete()` 和 `logger.error()` 是 `record()` 的 phase 快捷方式，不会结束任何 `start()` 句柄，三者的 `headers` 都接受 `HeaderInput`。`redactHeaders` 是在内置敏感字段之上追加的 header 名称。
-
-### HTTP/2 session 与 stream
-
-Node HTTP/2 adapter 按 origin 复用 session，但每个请求仍有独立 stream。单个 stream 的错误、abort、请求取消或超时只关闭该 stream；正常情况下不会因为一个请求失败而主动关闭共享 session。session 自身发生 `error` 或 `close` 时会广播网络错误结束该 session 上的活动 stream，并从复用表移除，后续请求会建立新 session。收到 `GOAWAY` 时会话同样立即退出复用池（即使已有 stream 仍在进行），这样新请求会改用新连接而不是持续失败。调用方仍应分别处理每个请求的错误。
-
-空闲 session 会被 `unref()`，因此一次性脚本在读完响应后可以正常退出。仍然持有连接时，可以显式关闭：
-
-```typescript
-await client.close(); // 关闭 adapter 持有的传输资源（例如 HTTP/2 session）
-```
-
-Node HTTP/2 的 `ReadableStream` 请求体在读取期间会响应取消；这类不可重放请求不会自动重试。上传写入会等待 `drain`，下载在消费端跟不上时会暂停底层流，因此大文件传输不会无限堆积内存。HTTP/3 不共享这套 session，实现细节由注入的 QUIC transport 负责。
 
 ## 取消和超时
 
@@ -317,11 +226,13 @@ controller.abort();
 await pending;
 ```
 
-外部取消会抛出 `ERR_CANCELED`，并会尽早结束仍在等待的请求拦截器、请求转换器、限速排队、adapter、响应体读取和响应拦截器；超时会抛出 `ETIMEDOUT`。取消请求不会自动重试。
+`timeout` 约束单次 adapter 尝试，包括响应体读取和响应拦截器等待；`totalTimeout` 从进入限速队列前开始计时，还覆盖排队、重试判断、退避等待以及所有尝试。二者超时都会抛出 `ETIMEDOUT`。
+
+外部取消会抛出 `ERR_CANCELED`，并会尽早结束仍在等待的请求拦截器、请求转换器、限速排队、adapter、响应体读取和响应拦截器。单次超时与外部取消竞争时，以先触发者为准；总超时计时器已经触发时返回 `ETIMEDOUT`。取消请求不会自动重试。自定义 adapter 和异步回调仍需主动响应 signal，才能停止已经开始的底层操作。
 
 ## 重试
 
-默认重试状态码是 `408`、`429`、`500`、`502`、`503` 和 `504`。GET、HEAD、OPTIONS、TRACE 等幂等方法可以按状态自动重试；POST、PUT、PATCH、DELETE 默认不按状态重试。
+默认不重试；设置 `retry` 后，默认重试状态码是 `408`、`429`、`500`、`502`、`503` 和 `504`，允许的方法是 GET、HEAD、OPTIONS 和 TRACE。POST、PUT、PATCH、DELETE 默认不自动重试。
 
 ```typescript
 const created = await http.post('/jobs', payload, {
@@ -335,7 +246,7 @@ const created = await http.post('/jobs', payload, {
 
 状态码策略的优先级是请求级 `retryOn`、请求级 `retry.statusCodes`、客户端级 `retryOn`、客户端级 `retry.statusCodes`，最后才是内置默认值；建议同一层只使用一种写法。默认 `respectRetryAfter: true`：有效的 `Retry-After` 会覆盖本地退避，之后 `maxDelay` 仍是最终上限，抖动也不会突破它；设为 `false` 才会忽略服务端退避。
 
-`retry.errorCodes` 是一份**白名单**：一旦显式提供，只有其中的错误码会被重试，`ERR_NETWORK` 和超时也不会例外；未提供时 `ERR_NETWORK` 与超时按默认策略重试。该白名单同时会覆盖某个错误默认的 `retryable: false`。无论是否设置白名单，调用方取消和不可重放的 `ReadableStream` 请求体始终不会重试，`validateStatus`/`throwHttpErrors` 这类本地策略回调抛出的 `ERR_INVALID_STATUS_POLICY` 也不会重试。
+`retry.errorCodes` 非空时是一份白名单，只有其中的错误码会按方法和次数策略重试，`ERR_NETWORK` 和超时也不会例外；未提供或为空时按默认错误策略处理。白名单可以覆盖错误默认的 `retryable: false`。默认策略不会重试本地状态回调抛出的 `ERR_INVALID_STATUS_POLICY`。
 
 每次尝试（包括重试）都会重新经过限速排队，因此自动重试不会绕过 `requestsPerInterval`；重试钩子（`beforeRetry`）和响应拦截器在等待期间不占用 `maxConcurrent` 名额，可以在其中安全地通过同一客户端发起令牌刷新等请求。
 
@@ -358,14 +269,12 @@ const response = await http.getResponse('/upstream', {
 });
 ```
 
-默认仍只对幂等方法按状态码重试；`methods` 可以显式放开方法范围，`shouldRetry` 可以接管应用错误的判断，但外部取消和不可重放的 `ReadableStream` 请求体始终不会重试。
-
-不可重放流的限制优先于自定义 `shouldRetry`，即使回调返回 `true` 也不会强行重试一次性 `ReadableStream`。
+`methods` 可以显式调整方法范围，`shouldRetry` 可以接管默认的方法、状态和错误判断。重试使用本轮实际发送的 method/body；诊断用的 `error.config` 不决定重试资格。外部取消和不可重放的 `ReadableStream` 请求体始终不会重试，即使 `shouldRetry` 返回 `true`。
 
 ## 拦截器
 
 ```typescript
-import { AxiosHeaders } from 'axnexus';
+import { AxiosHeaders } from '@nexusmc-cn/axnexus';
 
 http.interceptors.request.use((config) => {
   const headers = AxiosHeaders.from(config.headers);
@@ -404,16 +313,25 @@ await cachedHttp.get('/catalog', { bypassCache: true });
 cachedHttp.clearCache();
 ```
 
-缓存只作用于 GET。请求 key 包含 method、最终 URL、规范化请求头（自动生成的 `X-Request-Id` 除外）、`responseType` 以及 `credentials`、`mode`、`redirect`、`referrer`、`referrerPolicy`、`integrity` 和 `keepalive` 等 Fetch 行为选项；因此不同响应类型不会互相污染。相同 key 的进行中请求会共享一次 adapter 调用，但带 `signal`、`timeout`、`totalTimeout`、`maxBodySize`、`onDownloadProgress`、`rateLimit`、`schema`、自定义 `parseJson`、`transformResponse`、`validateStatus` 或 `throwHttpErrors` 的请求会主动跳过客户端 data cache，以保证调用方的截止时间、响应边界、进度事件、校验和状态策略不被共享请求吞掉；请求级 `retry` 与客户端默认不一致时也不会共享，避免把其他调用方的重试策略施加到本次请求；注册了请求或响应拦截器的实例同样会跳过该缓存，因为拦截器可能在重试时改变 URL、请求头或请求体。
+缓存只作用于 GET。请求 key 包含 method、最终 URL、规范化请求头（自动生成的 `X-Request-Id` 除外）、`responseType` 以及 `credentials`、`mode`、`redirect`、`referrer`、`referrerPolicy`、`integrity` 和 `keepalive` 等 Fetch 行为选项。相同 key 的进行中请求会共享一次 adapter 调用。
+
+以下请求会跳过客户端缓存与进行中请求去重，以保留各调用方的控制策略：
+
+- 带 `signal`，或启用了 `timeout` / `totalTimeout`。
+- 设置了 `maxBodySize`、`onDownloadProgress`、`rateLimit`、`schema`、`parseJson`、`transformResponse`、`validateStatus`、`throwHttpErrors`、`dispatcher` 或 `agent`，或包含请求体。
+- 请求级 `retry`、`retryOn` 或 `retryDelay` 与客户端默认值不一致。
+- 所属实例注册了请求或响应拦截器。
 
 非 GET 请求只要被发出过就会清空当前实例缓存——即使响应解析或校验随后失败，因为服务端可能已经应用了这次写入。缓存保存在内存中，不跨实例或持久化；`GetRequestCache` 默认最多保留 512 条、单条超过约 1 MB 的结果不入缓存，并提供 `prune()` 主动回收过期条目。
 
-需要 stale-while-revalidate 或 stale-if-error 时直接使用 `ResponseCache`：
+### stale-while-revalidate 响应缓存
+
+需要 stale-while-revalidate 或 stale-if-error 时直接使用 `ResponseCache`。它与客户端 GET 缓存独立，不共享条目：
 
 ```typescript
-import { ResponseCache } from 'axnexus';
+import { ResponseCache } from '@nexusmc-cn/axnexus';
 
-const cache = new ResponseCache<{ items: string[] }>();
+const cache = new ResponseCache<{ items: string[] }>({ maxEntries: 128 });
 const data = await cache.getOrLoad('catalog', loadCatalog, {
   ttl: 30_000,
   staleWhileRevalidate: 120_000,
@@ -421,48 +339,74 @@ const data = await cache.getOrLoad('catalog', loadCatalog, {
 });
 ```
 
-`fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求，会转发显式 `cookie`、处理空响应并允许注入 `fetch` 和 JSON parser；它的 `headers` 接受与主客户端相同的 `HeaderInput`（包括 `AxiosHeaders`），`maxBodySize` 默认不限制响应体；`timeout` 与 AVMCBBS 原实现的 `timeoutMs` 都可用：
+`maxEntries` 限制条目数量，默认是 `256`。写入和读取都会优先使用 `structuredClone`，再回退到 JSON clone；后者可能丢失 `Date`、`Map` 等类型信息。两种方式都不支持的值会按原引用返回，因此缓存值应视为不可变数据。没有公开的 clone 开关。
 
-`fetchJson` 不创建客户端实例，因此不会继承 `createHttpClient` 的 `credentials: 'include'` 默认值；需要跨源凭据时请显式传入 `credentials: 'include'` 或 `cookie`。
+直接使用 `GetRequestCache` 时，`options.signal` 只取消当前调用方的等待，不取消共享 loader。`ResponseCache` 本身不提供调用方取消选项，loader 的取消策略由调用方管理。
+
+## SSR 和一次性 JSON 请求
+
+`fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求。它支持显式传入 `cookie`、注入 `fetch` 和 JSON parser；`headers` 接受与主客户端相同的 `HeaderInput`（包括 `AxiosHeaders`），`maxBodySize` 默认不限制响应体。`timeout` 和 `timeoutMs` 都可用，同时提供时以 `timeoutMs` 为准。
+
+它不会继承 `createHttpClient` 的 `credentials: 'include'` 默认值；浏览器需要跨源凭据时显式传入 `credentials: 'include'`，服务端转发 Cookie 时使用 `cookie`。
 
 ```typescript
-import { fetchJson } from 'axnexus';
+import { fetchJson } from '@nexusmc-cn/axnexus';
 
 const data = await fetchJson<{ ok: boolean }>('https://api.example.test/health', {
   cookie: request.headers.get('cookie') ?? undefined,
   timeout: 5_000,
-  schema: userSchema,
 });
 ```
 
-客户端内置的 `GetRequestCache` 只负责 GET TTL 和进行中请求去重；独立的 `ResponseCache` 才提供 `staleWhileRevalidate`、`staleIfError`、容量上限和 clone 策略。两者不是同一层实现，不能通过 `client.cache` 直接启用 stale 行为；需要 stale 策略时请显式使用 `ResponseCache`。
+非 2xx 状态不会自动抛错，而是返回 `null`；`204`、`205`、`304`、`HEAD`、`Content-Length: 0`、空字节或只有空白字符的响应同样返回 `null`。需要状态码和原始响应时使用 `fetchJsonResult`：
+
+```typescript
+import { fetchJsonResult } from '@nexusmc-cn/axnexus';
+
+const result = await fetchJsonResult<{ ok: boolean }>('https://api.example.com/health', {
+  timeout: 5_000,
+});
+if (result.status >= 400) {
+  console.warn('upstream status:', result.status);
+}
+```
+
+成功状态的非空响应交给 `parseJson`（默认 `JSON.parse`）；解析失败抛出 `ERR_BAD_PAYLOAD`。超时或外部 signal 取消按原生 `AbortError` 传播，与客户端的 `ETIMEDOUT` / `ERR_CANCELED` 错误码不同。`fetchJsonResult` 的 `response` 已被 helper 消费或取消；需要原始响应体时使用客户端的 `responseType: 'response'`。
 
 ## 分块上传
 
-`uploadChunks` 只负责编排分块、并发和聚合进度，实际上传由调用方提供，因此可以复用 AVMCBBS 现有的 multipart、对象存储或分片协议：
+`uploadChunks` 接受 `Uint8Array`，负责编排分块、并发和聚合进度，实际上传由调用方提供，可接入 multipart、对象存储或自定义分片协议：
 
 ```typescript
-import { uploadChunks } from 'axnexus';
+import { uploadChunks } from '@nexusmc-cn/axnexus';
 
+const controller = new AbortController();
 const parts = await uploadChunks(bytes, {
   chunkSize: 5 * 1024 * 1024,
   concurrency: 3,
+  signal: controller.signal,
   retry: 2, // 每个分片额外尝试 2 次
   retryDelay: (attempt) => attempt * 200,
   onPartError: ({ part, attempt, error }) => reportPartFailure(part.index, attempt, error),
   onProgress: (loaded, total) => console.log(loaded / total),
-  upload: ({ index, body }) => putPart(index, body),
+  upload: ({ index, body, signal }) => putPart(index, body, { signal }),
 });
 ```
 
-`retry` 只作用于失败的分片，不会重新上传已经成功的分片；`onPartError` 会收到每次失败（包括最终失败）以及同一个编排 `signal`。某个分片最终失败时整体 Promise reject，并停止调度新的分片；已在途的上传只有在 `upload` 回调把 `part.signal` 传给底层请求并遵守它时才会停止。成功分片不会自动回滚，清理、断点续传和服务端合并由上传协议负责；上传回调应按分片 ID 保证幂等。
+`retry` 只作用于失败的分片，不会重新上传已经成功的分片；`onPartError` 会收到每次失败（包括最终失败）以及同一个编排 `signal`。重试复用相同的 `body`，上传回调不应修改它；`part.end` 是不包含在分片内的结束偏移。
+
+用户取消时调用 `controller.abort()`。编排器会停止新分片、重试等待和对异步回调的等待，并抛出原生 `AbortError`；回调必须把 `part.signal` 传给底层请求，才能取消在途网络操作。取消后的迟到结果不会写入聚合结果或触发成功进度。
+
+某个分片最终失败，或 `onPartError`、`retryDelay`、`onProgress` 抛错时，整体 Promise reject 并停止调度新分片；已经在途的上传不会自动取消或回滚。服务端清理、断点续传和合并由上传协议负责，上传回调应按分片 ID 保证幂等。`onProgress` 只累计成功分片的字节数，空 source 不产生进度事件。
+
+`chunkSize` 和 `concurrency` 向下取整为正整数，非有限或非正值回退为 `1`；`retryDelay` 的非有限或负值回退为 `0`。需要严格参数校验时，应在调用前完成。
 
 ## 请求观测
 
 `createRequestLogger` 将请求开始、完成和错误统一成可注入的记录格式，并默认脱敏 `authorization`、`cookie` 和 `set-cookie`。`record`、`start`、`complete` 和 `error` 都遵守同一套输入与脱敏规则；`start` 返回一次性生命周期句柄，句柄会用 `options.now`（默认 `Date.now`）计算耗时：
 
 ```typescript
-import { createRequestLogger } from 'axnexus';
+import { createRequestLogger } from '@nexusmc-cn/axnexus';
 
 const logger = createRequestLogger((record) => telemetry.emit(record));
 const span = logger.start({ method: 'GET', url, headers });
@@ -474,12 +418,26 @@ try {
 }
 ```
 
+`record(input)` 可以直接写入完整记录；字段如下：
+
+| 字段 | 说明 |
+| --- | --- |
+| `phase` | `start`、`complete` 或 `error` |
+| `method` / `url` | 请求方法和 URL，method 会规范化为大写 |
+| `headers` | 接受 `HeaderInput`，输出时规范化并脱敏敏感头 |
+| `status` | 可选的 HTTP 状态码 |
+| `duration` | 毫秒数；生命周期句柄可自动计算 |
+| `responseBytes` | 可选的响应字节数 |
+| `error` | 错误摘要，裁剪任意附加字段并脱敏 `HttpError.config.headers` |
+
+`start()` 返回的句柄只结束自己的生命周期，且只记录一次；顶层 `logger.complete()` 和 `logger.error()` 是 `record()` 的快捷方式，不会结束已有句柄。通过 `redactHeaders` 可追加需要脱敏的 header 名称。URL 和错误消息会按原文保留，记录前应避免在其中放入凭据。
+
 ## CSRF
 
 CSRF 不会默认启用。使用 `createCsrfInterceptor` 注入 token reader：
 
 ```typescript
-import { createCsrfInterceptor } from 'axnexus';
+import { createCsrfInterceptor } from '@nexusmc-cn/axnexus';
 
 const csrf = createCsrfInterceptor({
   readToken: () => getCsrfTokenFromYourStore(),
@@ -492,11 +450,11 @@ http.interceptors.request.use(csrf);
 
 ## HTTP/2 和 HTTP/3
 
-HTTP/2 通过独立入口启用，adapter 会按 origin 复用 session，并在完整响应中标记 `protocol: 'h2'`。Node 使用原生 `node:http2`；Bun 使用其 Node 兼容层时建议按实验性能力验证：
+HTTP/2 通过独立入口启用，adapter 会按 origin 复用 session，并在完整响应中标记 `protocol: 'h2'`。Node 使用原生 `node:http2`；Bun 中通过 Node 兼容层接入的 HTTP/2 按实验性能力使用：
 
 ```typescript
-import { createHttpClient } from 'axnexus';
-import { nodeHttp2Adapter } from 'axnexus/node-http2';
+import { createHttpClient } from '@nexusmc-cn/axnexus';
+import { nodeHttp2Adapter } from '@nexusmc-cn/axnexus/node-http2';
 
 const nodeHttp = createHttpClient({
   baseURL: 'https://api.example.com',
@@ -506,28 +464,38 @@ const response = await nodeHttp.getResponse('/health');
 console.log(response.protocol); // h2
 ```
 
-HTTP/3 不绑定具体 QUIC 实现，调用方提供 `QuicTransport` 后从 `axnexus/node-http3` 创建 adapter：
+每个请求有独立 stream，单个请求的错误、取消或超时只关闭该 stream。session 自身发生 `error` 或 `close` 时，会结束该 session 上的活动请求并移出复用池；收到 `GOAWAY` 后新请求会建立新连接。调用方仍需分别处理每个请求的错误。
+
+空闲 session 会被 `unref()`。需要显式释放 adapter 持有的传输资源时调用：
 
 ```typescript
-import { createHttp3Adapter } from 'axnexus/node-http3';
+await nodeHttp.close();
+```
+
+Node HTTP/2 上传写入会等待 `drain`，下载在消费端跟不上时暂停底层流；`ReadableStream` 请求体支持读取期间取消，且不会自动重试。HTTP/3 的连接管理和背压由注入的 transport 负责。
+
+HTTP/3 不绑定具体 QUIC 实现，调用方提供 `QuicTransport` 后从 `@nexusmc-cn/axnexus/node-http3` 创建 adapter：
+
+```typescript
+import { createHttp3Adapter } from '@nexusmc-cn/axnexus/node-http3';
 
 const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) });
 ```
 
-没有注入 transport 时会抛出 `ERR_UNSUPPORTED_ADAPTER`。默认入口不会加载 Node 内置模块，也不会把 HTTP/1.1 Fetch 请求误标为 HTTP/2 或 HTTP/3。Node HTTP/2 的 `ReadableStream` 请求体会在读取期间响应取消；不可重放的流请求不会自动重试。
+没有注入 transport 时会抛出 `ERR_UNSUPPORTED_ADAPTER`。默认入口不会加载 Node 内置模块；默认 Fetch adapter 不提供底层协议探测，完整响应中的 `protocol` 为 `'unknown'`。
 
 ### Bun 运行时
 
-根入口使用标准 Fetch、Headers、Response、ReadableStream、Blob 和 AbortSignal，在 Bun 下可以直接使用。仓库提供 `npm run test:bun`，会先构建产物，再用 Bun 测试完整测试目录；CI 当前固定使用 Bun 1.4.2。
+根入口依赖标准 Fetch、Headers、Response、ReadableStream、Blob 和 AbortSignal。Bun 的支持范围取决于这些 Web API 以及所选 adapter 的兼容性：
 
 | 入口/功能 | Bun 状态 | 说明 |
 | --- | --- | --- |
-| `axnexus` | 已验证 | 默认 Fetch、`fetchJson`、Standard Schema、流式上传和取消均通过冒烟检查 |
-| `axnexus/node-http2` | 实验性 | Bun 的 `node:http2` 客户端/服务端可用，但与 Node 并非完全一致，生产环境应覆盖 TLS、ALPN、session 复用和错误隔离 |
-| `axnexus/node-http3` | 需注入 transport | 不绑定 Bun 的实验性 `node:quic`，由调用方提供 QUIC transport |
+| `@nexusmc-cn/axnexus` | 标准 Web API | 使用 Bun 提供的 Fetch 及相关 Web API |
+| `@nexusmc-cn/axnexus/node-http2` | 实验性 | 依赖 Bun 的 `node:http2` 兼容层，使用前应覆盖实际所需的 TLS、ALPN、session 复用和错误隔离场景 |
+| `@nexusmc-cn/axnexus/node-http3` | 需注入 transport | 由调用方提供适用于当前运行时的 QUIC transport |
 | XHR adapter | 浏览器专用 | Bun 没有浏览器 XHR 时会返回 `ERR_UNSUPPORTED_ADAPTER`，不会自动 polyfill |
 
-Bun 会对部分 `Blob.type` 值补充 `charset=utf-8`；HTTP/2 请求需要固定媒体类型时，请显式传入 `Content-Type`。Bun 还提供 `proxy`、`tls`、`unix`、`protocol`、`decompress` 和 `verbose` 等扩展，本包暂不把它们加入跨运行时的 `RequestConfig`；需要这些能力时应通过自定义 Fetch adapter 传递。详见 [Bun Fetch 文档](https://bun.sh/docs/runtime/networking/fetch)、[Bun Node.js 兼容性](https://bun.sh/docs/runtime/nodejs-compat) 和 [Bun 模块解析](https://bun.sh/docs/runtime/module-resolution)。
+跨运行时的 `RequestConfig` 不包含 Bun 专有 Fetch 选项；需要运行时扩展时，可通过 `createFetchAdapter` 注入自定义 fetch 实现。
 
 ## 运行环境差异
 
@@ -537,51 +505,10 @@ Bun 会对部分 `Blob.type` 值补充 `charset=utf-8`；HTTP/2 请求需要固�
 | AbortSignal 和超时 | 支持 | 支持 | 支持 | 支持 | 由 transport 决定 |
 | 下载进度 | response body 可读时支持 | 支持 | response body 可读时支持 | 支持 | 由 transport 决定 |
 | 上传进度 | 标准 Fetch 不保证 | 支持 `xhr.upload` | 标准 Fetch 不保证 | 由 adapter 实现 | 由 transport 决定 |
-| HTTP/2 | 浏览器自行协商，客户端不强制 | 浏览器自行协商 | 默认 Fetch 不强制 | `axnexus/node-http2` | 不适用 |
-| HTTP/3 | 浏览器自行协商 | 浏览器自行协商 | 默认不启用 | 不适用 | `axnexus/node-http3` + QUIC transport |
+| HTTP/2 | 浏览器自行协商，客户端不强制 | 浏览器自行协商 | 默认 Fetch 不强制 | `@nexusmc-cn/axnexus/node-http2` | 不适用 |
+| HTTP/3 | 浏览器自行协商 | 浏览器自行协商 | 默认不启用 | 不适用 | `@nexusmc-cn/axnexus/node-http3` + QUIC transport |
 
 Node.js HTTP/2 和 HTTP/3 入口不会被默认入口加载。
-
-## 与 Axios 的边界
-
-| 能力 | axnexus | Axios |
-| --- | --- | --- |
-| 默认传输 | 原生 Fetch，浏览器可切换 XHR | 浏览器 XHR、Node.js adapter |
-| 超时 | `timeout`（单次）+ `totalTimeout`（排队、重试和读取总计） | 主要是单请求 timeout |
-| 重试 | 结构化策略、状态码、错误码、退避、抖动和 `Retry-After` | 需额外配置或插件 |
-| 进度与限速 | Fetch/XHR 进度、资源组并发和字节 token bucket | 进度支持，限速通常由调用方实现 |
-| 缓存 | 可选 GET TTL、inflight 去重，另有 `ResponseCache` | 默认不提供同层 GET 缓存 |
-| HTTP/2 / HTTP/3 | 独立入口和可注入 transport | 依赖 Node adapter 或外部实现 |
-| Headers | `AxiosHeaders` 与原生 `Headers` 明确转换 | `AxiosHeaders` 由 Axios 自身管理 |
-
-这张表只比较本包已经实现并有测试覆盖的行为，不承诺替代 Axios 的业务生态或所有 adapter。
-
-## 模块结构
-
-```text
-src/
-  core/
-    client.ts       实例工厂和公共方法适配
-    pipeline.ts     请求生命周期、调度、重试和最终错误归一化
-    attempt.ts      单次 adapter 调用、响应读取和响应拦截器
-    config.ts       配置合并、URL、请求体和转换器
-    control.ts      AbortSignal 组合、可取消竞态和延迟
-    retry.ts        重试判定、退避、抖动和 Retry-After
-    cache-policy.ts 缓存 key 和缓存资格判断
-    errors.ts       HttpError 和共享错误归一化
-    interceptors.ts 拦截器管理器与执行链
-    types.ts        客户端配置、响应和 adapter 类型
-  headers/    AxiosHeaders、method defaults 和 presets
-  transfer/   progress、限速、multipart 和 chunked 上传编排
-  adapters/   fetch、xhr、node-http2、node-http3
-  cache/      GET TTL、inflight 去重和 stale 响应缓存
-  server/     SSR/middleware JSON helper
-  observability/ 请求生命周期日志与脱敏
-  security/   CSRF 与 header sanitizer
-  utils/      body、response、query、AbortSignal 工具
-```
-
-该包只负责通用 HTTP 传输，不包含 AVMCBBS 的业务 API、认证弹窗、站点配置或上传端点协议。
 
 ## 开发
 
@@ -592,7 +519,7 @@ npm run build
 npm run test:bun
 ```
 
-`npm test` 是 Node.js 测试入口；`npm run test:bun` 或 `bun run test:bun` 需要本机已安装 Bun。两者都会先生成最新的 `dist/`，其中 Bun 入口使用 `bun x tsc` 编译。构建产物位于 `dist/`，包不需要 AVMCBBS 或其他业务项目才能构建和测试。
+贡献代码时，`npm test` 使用 Node.js 执行测试；`npm run test:bun` 需要本机已安装 Bun。两者都会先生成最新的 `dist/`。仓库 CI 使用 Node.js 22 和 Bun 1.4.2，运行测试需使用支持对应测试命令的运行时。
 
 ## 许可证
 
