@@ -22,9 +22,10 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
 }
 
 // #1 — a schema must not be bypassed by a cache entry stored without one.
-test('issue 1: a schema request never reuses a cache entry stored without one', async () => {
+test('issue 1: a schema request validates a snapshot stored without one', async () => {
   let calls = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 5_000 },
     adapter: async () => {
       calls += 1;
@@ -43,7 +44,7 @@ test('issue 1: a schema request never reuses a cache entry stored without one', 
     } as never),
     (error: unknown) => error instanceof HttpError && error.code === 'ERR_SCHEMA_VALIDATION',
   );
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
 });
 
 // #6 / #55 — a JSON null is a value the schema must see; an empty-issues
@@ -179,6 +180,7 @@ test('issue 45: a failed response parse after a write still invalidates the cach
   let stored = 'before';
   let writes = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 60_000 },
     adapter: async (config) => {
       if (config.method === 'PUT') {

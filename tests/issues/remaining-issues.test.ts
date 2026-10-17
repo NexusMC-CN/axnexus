@@ -107,12 +107,12 @@ for (const ending of ['drain', 'abort', 'close', 'error'] as const) {
 
 // #30 — concurrent GET de-duplication must not impose another caller's retry.
 test('issue 30: a shared GET load does not borrow another caller retry policy', async () => {
-  // If the two callers shared a single load, the non-retrying caller would
-  // receive the value produced for the retrying one with no request of its own.
-  // A correct implementation keeps them separate.
+  // A shared failed network attempt must not share the retrying caller's
+  // eventual success with a caller whose policy disallows retry.
   for (const retryFirst of [true, false]) {
     let calls = 0;
     const client = createHttpClient({
+      credentials: 'omit', cache: true,
       adapter: async () => {
         calls += 1;
         return calls === 1
@@ -135,21 +135,14 @@ test('issue 30: a shared GET load does not borrow another caller retry policy', 
     // The retrying caller always ends up with the retried success.
     assert.deepEqual('value' in retryResult ? retryResult.value : undefined, { ok: true });
 
-    // The plain caller must never receive a value fetched under the other
-    // caller's retry policy without issuing its own request.
-    const callsForPlain = retryFirst ? 3 : 2;
-    assert.equal(calls, callsForPlain, `unexpected adapter call count (retryFirst=${retryFirst})`);
-    if (!retryFirst) {
-      // It ran first and observed the original 503 rather than waiting for the
-      // retrying caller's second attempt.
-      assert.equal('error' in plainResult, true);
-    }
+    assert.equal(calls, 2, `unexpected adapter call count (retryFirst=${retryFirst})`);
+    assert.equal('error' in plainResult, true);
   }
 });
 
-test('issue 30: standalone retryOn and retryDelay change cache identity and eligibility', () => {
+test('issue 30: standalone retryOn and retryDelay share bytes without changing cache identity', () => {
   const base = {
-    url: 'https://example.test/shared', method: 'GET', headers: new Headers(), cache: true, retry: 1,
+    url: 'https://example.test/shared', method: 'GET', credentials: 'omit', headers: new Headers(), cache: true, retry: 1,
   } as never;
   const retryOnA = { ...base, retryOn: [] };
   const retryOnB = { ...base, retryOn: [503] };
@@ -159,29 +152,27 @@ test('issue 30: standalone retryOn and retryDelay change cache identity and elig
     config,
     defaultCache: true,
     fullResponse: false,
-    requestInterceptorCount: 0,
-    responseInterceptorCount: 0,
-    defaultRetry: 1,
   });
 
-  assert.equal(policy(retryOnA).enabled, false);
-  assert.equal(policy(retryOnB).enabled, false);
-  assert.notEqual(cacheKey(retryOnA), cacheKey(retryOnB));
-  assert.equal(policy(retryDelayA).enabled, false);
-  assert.equal(policy(retryDelayB).enabled, false);
-  assert.notEqual(cacheKey(retryDelayA), cacheKey(retryDelayB));
+  assert.equal(policy(retryOnA).share, true);
+  assert.equal(policy(retryOnB).share, true);
+  assert.equal(cacheKey(retryOnA), cacheKey(retryOnB));
+  assert.equal(policy(retryDelayA).share, true);
+  assert.equal(policy(retryDelayB).share, true);
+  assert.equal(cacheKey(retryDelayA), cacheKey(retryDelayB));
 });
 
-test('issue 30: concurrent GETs with standalone retryOn do not share attempts', async () => {
+test('issue 30: concurrent GETs retain standalone retryOn after a shared attempt', async () => {
   let calls = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: true,
     retry: 1,
     retryDelay: 0,
     adapter: async () => {
       calls += 1;
       await new Promise((resolve) => setImmediate(resolve));
-      return calls <= 2 ? jsonResponse({ retry: true }, 503) : jsonResponse({ ok: true });
+      return calls === 1 ? jsonResponse({ retry: true }, 503) : jsonResponse({ ok: true });
     },
   });
 
@@ -191,19 +182,20 @@ test('issue 30: concurrent GETs with standalone retryOn do not share attempts', 
   ]);
   assert.equal(withoutRetry.status, 'rejected');
   assert.equal(withRetry.status, 'fulfilled');
-  assert.equal(calls, 3);
+  assert.equal(calls, 2);
 });
 
-test('issue 30: concurrent GETs with standalone retryDelay do not share attempts', async () => {
+test('issue 30: concurrent GETs retain standalone retryDelay after a shared attempt', async () => {
   let calls = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: true,
     retry: 1,
     retryOn: [503],
     adapter: async () => {
       const call = ++calls;
       await new Promise((resolve) => setImmediate(resolve));
-      return call <= 2 ? jsonResponse({ retry: true }, 503) : jsonResponse({ ok: true });
+      return call === 1 ? jsonResponse({ retry: true }, 503) : jsonResponse({ ok: true });
     },
   });
 
@@ -212,7 +204,7 @@ test('issue 30: concurrent GETs with standalone retryDelay do not share attempts
     client.get('/retry-delay-isolation', { retryDelay: 10 } as never),
   ]);
   assert.deepEqual(results, [{ ok: true }, { ok: true }]);
-  assert.equal(calls, 4);
+  assert.equal(calls, 3);
 });
 
 // #47 — a failed serialization must not run the same serializer twice.

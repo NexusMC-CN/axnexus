@@ -1,3 +1,7 @@
+import { scheduleTimer } from '../core/lifecycle/timers.js';
+import { validateTimeout } from '../core/configuration/validation.js';
+import { assertBrowserMethod } from './method.js';
+import { markResponseDecoded, markResponseMethod } from '../utils/response.js';
 import { HttpError } from '../core/errors.js';
 import { isReadableStreamBody } from '../core/retry.js';
 import type { AdapterConfig, HttpAdapterFactory } from './types.js';
@@ -33,6 +37,15 @@ function abortError(signal?: AbortSignal): HttpError {
 export function createXhrAdapter(): HttpAdapterFactory {
   let lastRelease: (() => void) | undefined;
   const factory = ((config: AdapterConfig) => new Promise<Response>((resolve, reject) => {
+    assertBrowserMethod(config.method);
+    const timeout = validateTimeout(config.timeout, 'timeout');
+    if (config.redirect === 'error' || config.redirect === 'manual') {
+      reject(new HttpError(`XMLHttpRequest cannot enforce redirect: ${config.redirect}`, {
+        code: 'ERR_UNSUPPORTED_ADAPTER',
+        retryable: false,
+      }));
+      return;
+    }
     const signal = config.signal ?? config.rateLimit?.signal;
     if (signal?.aborted) {
       reject(abortError(signal));
@@ -65,7 +78,9 @@ export function createXhrAdapter(): HttpAdapterFactory {
       ? new ProgressTracker({ phase: 'download', onProgress: config.onDownloadProgress, progressInterval: config.progressInterval, signal })
       : undefined;
     let settled = false;
+    let cancelTimer: (() => void) | undefined;
     const cleanup = () => {
+      cancelTimer?.();
       signal?.removeEventListener('abort', onAbort);
       lastRelease = undefined;
     };
@@ -108,7 +123,7 @@ export function createXhrAdapter(): HttpAdapterFactory {
         cleanup();
         uploadTracker?.complete();
         downloadTracker?.complete();
-        resolve(response);
+        resolve(markResponseDecoded(markResponseMethod(response, config.method)));
       } catch (cause) {
         fail(new HttpError('Invalid XMLHttpRequest response', { code: 'ERR_NETWORK', retryable: true, cause }));
       }
@@ -149,7 +164,13 @@ export function createXhrAdapter(): HttpAdapterFactory {
         return;
       }
       xhr.withCredentials = config.credentials === 'include';
-      if (config.timeout && config.timeout > 0) xhr.timeout = config.timeout;
+      if (timeout > 0) {
+        cancelTimer = scheduleTimer(() => {
+          if (settled) return;
+          fail(new HttpError('Request timed out', { code: 'ETIMEDOUT', isTimeout: true, retryable: true }));
+          try { xhr.abort(); } catch { /* already closed */ }
+        }, timeout);
+      }
       config.headers.forEach((value, name) => xhr.setRequestHeader(name, value));
       if (config.onUploadProgress && xhr.upload) {
         xhr.upload.onprogress = (event) => {

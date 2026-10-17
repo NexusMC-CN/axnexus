@@ -1,4 +1,5 @@
 import { combineSignals } from '../utils/signal.js';
+import { scheduleTimer } from './lifecycle/timers.js';
 
 export { combineSignals };
 
@@ -50,9 +51,9 @@ export function raceWithSignal<T>(value: PromiseLike<T> | T, signal?: AbortSigna
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelTimer: (() => void) | undefined;
     const cleanup = () => {
-      if (timer) clearTimeout(timer);
+      cancelTimer?.();
       signal?.removeEventListener('abort', onAbort);
     };
     const onAbort = () => {
@@ -61,7 +62,7 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     };
     if (signal?.aborted) return onAbort();
     signal?.addEventListener('abort', onAbort, { once: true });
-    timer = setTimeout(() => {
+    cancelTimer = scheduleTimer(() => {
       cleanup();
       resolve();
     }, ms);

@@ -1,3 +1,4 @@
+import { scheduleTimer } from '../core/lifecycle/timers.js';
 type CacheEntry = {
   expiresAt: number;
   value: unknown;
@@ -15,6 +16,8 @@ export interface CacheWaitOptions {
   signal?: AbortSignal;
   /** Absolute epoch time in milliseconds at which this caller's wait expires. */
   deadline?: number;
+  /** Whether the resolved value may be retained. */
+  shouldStore?: (value: unknown) => boolean;
 }
 
 function cloneValue<T>(value: T): T {
@@ -57,9 +60,9 @@ function waitFor<T>(promise: Promise<T>, options: CacheWaitOptions | undefined):
   const deadline = normalizeDeadline(options?.deadline);
   if (!signal && deadline === undefined) return promise;
   return new Promise<T>((resolve, reject) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: (() => void) | undefined;
     const cleanup = () => {
-      if (timer) clearTimeout(timer);
+      timer?.();
       signal?.removeEventListener('abort', onAbort);
     };
     const onAbort = () => {
@@ -81,7 +84,7 @@ function waitFor<T>(promise: Promise<T>, options: CacheWaitOptions | undefined):
         promise.catch(() => undefined);
         return onDeadline();
       }
-      timer = setTimeout(onDeadline, remaining);
+      timer = scheduleTimer(onDeadline, remaining);
     }
     signal?.addEventListener('abort', onAbort, { once: true });
     promise.then(
@@ -105,7 +108,7 @@ export interface GetRequestCacheOptions {
 export class GetRequestCache {
   readonly instanceId: string;
   private readonly responseCache = new Map<string, CacheEntry>();
-  private readonly inflightRequests = new Map<string, Promise<unknown>>();
+  private readonly inflightRequests = new Map<string, { promise: Promise<unknown>; controller: AbortController; users: number; settled: boolean }>();
   private readonly maxEntries: number;
   private generation = 0;
 
@@ -157,7 +160,7 @@ export class GetRequestCache {
   async getOrLoad<T>(
     key: string,
     ttlMs: number,
-    loader: () => Promise<T>,
+    loader: (signal: AbortSignal) => Promise<T>,
     options?: CacheWaitOptions,
   ): Promise<T> {
     assertWaitAllowed(options);
@@ -169,36 +172,35 @@ export class GetRequestCache {
     }
     if (cached && cached.expiresAt <= now) this.responseCache.delete(key);
 
-    const inflight = this.inflightRequests.get(key) as Promise<T> | undefined;
-    if (inflight) return cloneValue(await waitFor(inflight, options));
-
-    const pending = loader().then((value) => {
-      if (ttlMs > 0 && generation === this.generation) {
-        const stored = cloneValue(value);
-        if (estimateBytes(stored) <= MAX_ENTRY_BYTES) {
-          this.store(key, {
-            expiresAt: Date.now() + ttlMs,
-            value: stored,
-          });
+    let inflight = this.inflightRequests.get(key);
+    if (!inflight) {
+      const controller = new AbortController();
+      const entry = { controller, users: 0, settled: false, promise: undefined as unknown as Promise<unknown> };
+      // Schedule the loader after registering ownership so synchronous throws
+      // and reentrant callers cannot escape the shared lifecycle.
+      entry.promise = Promise.resolve().then(() => loader(controller.signal)).then((value) => {
+        if (ttlMs > 0 && generation === this.generation && !controller.signal.aborted
+          && (options?.shouldStore?.(value) ?? true) && estimateBytes(value) <= MAX_ENTRY_BYTES) {
+          this.store(key, { expiresAt: Date.now() + ttlMs, value: cloneValue(value) });
         }
+        return value;
+      }).finally(() => {
+        entry.settled = true;
+        if (this.inflightRequests.get(key) === entry) this.inflightRequests.delete(key);
+      });
+      this.inflightRequests.set(key, entry);
+      inflight = entry;
+    }
+    inflight.users += 1;
+    try {
+      return cloneValue(await waitFor(inflight.promise as Promise<T>, options));
+    } finally {
+      inflight.users -= 1;
+      if (inflight.users === 0 && !inflight.settled) {
+        if (this.inflightRequests.get(key) === inflight) this.inflightRequests.delete(key);
+        inflight.controller.abort(createWaitError('All subscribers left', 'AbortError'));
       }
-      return cloneValue(value);
-    });
-    this.inflightRequests.set(key, pending);
-    // Clean up independently of any subscriber. A canceled subscriber must not
-    // remove the shared promise while another caller is still waiting on it.
-    pending.then(
-      () => {
-        if (this.inflightRequests.get(key) === pending) this.inflightRequests.delete(key);
-        // Opportunistically reclaim expired payloads so the map cannot grow
-        // without bound when callers keep requesting new URLs.
-        if (this.responseCache.size > this.maxEntries) this.prune();
-      },
-      () => {
-        if (this.inflightRequests.get(key) === pending) this.inflightRequests.delete(key);
-      },
-    );
-    return cloneValue(await waitFor(pending, options));
+    }
   }
 
   clear(): void {
@@ -209,12 +211,38 @@ export class GetRequestCache {
 }
 
 /** Cheap upper-bound estimate used to avoid pinning very large payloads. */
-function estimateBytes(value: unknown): number {
-  if (value === null || value === undefined || typeof value !== 'object') return 0;
-  try {
-    return JSON.stringify(value)?.length ?? 0;
-  } catch {
-    return 0;
+function estimateBytes(value: unknown, seen = new Set<object>()): number {
+  if (typeof value === 'string') return new TextEncoder().encode(value).byteLength;
+  if (value === null || value === undefined) return 0;
+  if (typeof value !== 'object') return 8;
+  if (value instanceof Blob) return value.size;
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  // structuredClone retains the entire backing buffer, including bytes outside
+  // a small view. Estimate the bytes that actually remain resident.
+  if (ArrayBuffer.isView(value)) return value.buffer.byteLength;
+  if (value instanceof Date) return 8;
+  if (value instanceof RegExp) return estimateBytes(value.source) + estimateBytes(value.flags);
+  if (seen.has(value)) return Infinity;
+  seen.add(value);
+  let total = 0;
+  if (value instanceof Map) {
+    for (const [key, child] of value) {
+      total += estimateBytes(key, seen) + estimateBytes(child, seen);
+      if (total > MAX_ENTRY_BYTES) break;
+    }
+  } else if (value instanceof Set) {
+    for (const child of value) {
+      total += estimateBytes(child, seen);
+      if (total > MAX_ENTRY_BYTES) break;
+    }
+  } else {
+    const prototype = Object.getPrototypeOf(value);
+    if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return Infinity;
+    for (const [key, child] of Object.entries(value)) {
+      total += estimateBytes(key) + estimateBytes(child, seen);
+      if (total > MAX_ENTRY_BYTES) break;
+    }
   }
+  seen.delete(value);
+  return total;
 }
-

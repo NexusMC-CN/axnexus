@@ -1,21 +1,52 @@
 import { HttpError } from '../core/errors.js';
-import type { JsonParser, ResponseType } from '../core/types.js';
+import { validateMaxBodySize } from '../core/configuration/validation.js';
+import { raceWithSignal, signalReason } from '../core/control.js';
+import type { AdapterResult, JsonParser, ResponseType } from '../core/types.js';
 
-/**
- * `undefined`, negative, NaN and Infinity intentionally mean unlimited.
- * Only a real number counts: `null`/`false`/`''` coerce to 0 and would
- * otherwise silently become a zero-byte limit that rejects every body.
- */
-function normalizeMaxBodySize(maxBodySize: number | undefined): number | undefined {
-  if (typeof maxBodySize !== 'number') return undefined;
-  return maxBodySize;
+function assertSize(size: number, maxBodySize: number | undefined): void {
+  const limit = validateMaxBodySize(maxBodySize);
+  if (limit !== undefined && size > limit) {
+    throw new HttpError('Response body exceeds maxBodySize', { code: 'ERR_MAX_BODY_SIZE' });
+  }
 }
 
-/** `undefined`, negative, NaN and Infinity intentionally mean unlimited. */
-function assertSize(size: number, maxBodySize: number | undefined): void {
-  const limit = normalizeMaxBodySize(maxBodySize);
-  if (limit !== undefined && limit >= 0 && size > limit) {
-    throw new HttpError('Response body exceeds maxBodySize', { code: 'ERR_MAX_BODY_SIZE' });
+const DECODED_RESPONSES = new WeakSet<Response>();
+
+/** Fetch/XHR expose decoded bytes while retaining encoded Content-Length. */
+export function markResponseDecoded(response: Response): Response {
+  DECODED_RESPONSES.add(response);
+  return response;
+}
+
+export function responseBodyIsDecoded(response: Response): boolean {
+  return DECODED_RESPONSES.has(response);
+}
+
+/** Preserve transport body semantics across response clones and wrappers. */
+export function copyResponseBodyMetadata(source: Response, target: Response): Response {
+  if (DECODED_RESPONSES.has(source)) markResponseDecoded(target);
+  return markResponseMethod(target, responseMethod(source));
+}
+
+/** Race transport work and dispose responses that arrive after cancellation. */
+export async function awaitTransportResponse<T extends Response | AdapterResult>(
+  pending: PromiseLike<T>, signal?: AbortSignal,
+): Promise<T> {
+  let accepted = false;
+  let produced: T | undefined;
+  const dispose = (value: T) => cancelBody(value instanceof Response ? value : value.response, signal?.reason);
+  const observed = Promise.resolve(pending).then((value) => {
+    produced = value;
+    if (signal?.aborted) dispose(value);
+    return value;
+  });
+  try {
+    const value = await raceWithSignal(observed, signal);
+    if (signal?.aborted) throw signalReason(signal);
+    accepted = true;
+    return value;
+  } finally {
+    if (!accepted && produced) dispose(produced);
   }
 }
 
@@ -64,6 +95,8 @@ function carriesNoPayload(response: Response): boolean {
 }
 
 function declaredSize(response: Response): number | undefined {
+  const encoding = response.headers.get('content-encoding')?.trim().toLowerCase();
+  if (DECODED_RESPONSES.has(response) && encoding && encoding !== 'identity') return undefined;
   const raw = response.headers.get('content-length');
   if (raw === null || !raw.trim()) return undefined;
   const declared = Number(raw);
@@ -258,7 +291,7 @@ async function readBytes(
  * HEAD and bodyless statuses carry no payload and are left untouched.
  */
 function limitRawResponse(response: Response, maxBodySize?: number, signal?: AbortSignal): Response {
-  const limit = normalizeMaxBodySize(maxBodySize);
+  const limit = validateMaxBodySize(maxBodySize);
   const enforcesLimit = limit !== undefined && Number.isFinite(limit) && limit >= 0;
   if (!enforcesLimit && !signal) return response;
   if (carriesNoPayload(response)) return response;
@@ -363,7 +396,7 @@ function limitRawResponse(response: Response, maxBodySize?: number, signal?: Abo
       Object.defineProperty(wrapped, key, { value, configurable: true, enumerable: true });
     } catch { /* a runtime may expose these as non-configurable getters */ }
   }
-  markResponseMethod(wrapped, responseMethod(response));
+  copyResponseBodyMetadata(response, wrapped);
   RAW_RESPONSE_LIFECYCLES.set(wrapped, lifecycle);
   return wrapped;
 }
@@ -375,6 +408,7 @@ export async function readResponse(
   parseJson: JsonParser = (text) => JSON.parse(text),
   signal?: AbortSignal,
 ): Promise<unknown | undefined> {
+  validateMaxBodySize(maxBodySize);
   if (type === 'response') return limitRawResponse(response, maxBodySize, signal);
   // No payload at all: 204/205/304 and HEAD. Distinct from a JSON `null` body,
   // which is a real value that schema validation must still see.
@@ -401,9 +435,10 @@ export async function readResponse(
 }
 
 export async function readErrorPayload(response: Response, maxBodySize?: number, signal?: AbortSignal): Promise<unknown> {
+  validateMaxBodySize(maxBodySize);
   // `Response.clone()` tees the stream: cancelling the clone does not cancel
   // the underlying source, so the original response must be released too.
-  const clone = response.clone();
+  const clone = copyResponseBodyMetadata(response, response.clone());
   try {
     const text = await readResponse(clone, 'text', maxBodySize, undefined, signal) as string | null | undefined;
     cancelBody(response);

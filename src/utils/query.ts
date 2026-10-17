@@ -19,6 +19,9 @@ export function serializeParams(params: Readonly<QueryParams> | undefined): stri
 }
 
 export function resolveURL(baseURL = '', path = '', allowAbsoluteURL = true): string {
+  if (/[\x00-\x1f\x7f]/.test(String(baseURL || '')) || /[\x00-\x1f\x7f]/.test(String(path || ''))) {
+    throw new TypeError('URL must not contain control characters');
+  }
   const base = String(baseURL || '').trim().replace(/\/+$/, '');
   const target = String(path || '').trim();
   // URL parsers treat a backslash as a path separator, so `/\host/path` is a

@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { HttpError } from '../../dist/index.js';
+import { createHttpClient, HttpError } from '../../dist/index.js';
 import { createHttp3Adapter } from '../../dist/adapters/node-http3.js';
 
 test('http3 adapter requires an injected transport', () => {
@@ -103,4 +103,23 @@ test('http3 adapter does not let a throwing cancel hook escape the abort path', 
   const pending = adapter({ url: 'https://example.test/', method: 'GET', headers: new Headers(), signal: controller.signal } as never);
   controller.abort();
   await assert.rejects(pending, (error: unknown) => error instanceof HttpError && error.code === 'ERR_CANCELED');
+});
+
+test('http3 adapter releases late Response and QuicResponse bodies after timeout', async () => {
+  for (const nativeResponse of [true, false]) {
+    let complete!: (value: Response | { status: number; body: ReadableStream<Uint8Array> }) => void;
+    let canceledBodies = 0;
+    let canceledTransports = 0;
+    const adapter = createHttp3Adapter({
+      request: () => new Promise((resolve) => { complete = resolve; }),
+      cancel: () => { canceledTransports++; },
+    });
+    const client = createHttpClient({ adapter, timeout: 10 });
+    await assert.rejects(client.get('https://example.test/'), { code: 'ETIMEDOUT' });
+    const body = new ReadableStream<Uint8Array>({ cancel() { canceledBodies++; } });
+    complete(nativeResponse ? new Response(body) : { status: 200, body });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(canceledTransports, 1);
+    assert.equal(canceledBodies, 1);
+  }
 });

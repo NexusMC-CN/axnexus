@@ -1,3 +1,5 @@
+import { scheduleTimer } from '../core/lifecycle/timers.js';
+
 export interface ChunkUploadPart {
   index: number;
   start: number;
@@ -92,7 +94,7 @@ function waitForRetry(delay: number, signal: AbortSignal | undefined): Promise<v
 
   return new Promise<void>((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
+    const timer = scheduleTimer(() => {
       if (settled) return;
       settled = true;
       signal?.removeEventListener('abort', onAbort);
@@ -102,7 +104,7 @@ function waitForRetry(delay: number, signal: AbortSignal | undefined): Promise<v
     const onAbort = (): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      timer();
       signal?.removeEventListener('abort', onAbort);
       reject(abortError());
     };

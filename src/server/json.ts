@@ -1,3 +1,7 @@
+import { validateMaxBodySize, validateTimeout } from '../core/configuration/validation.js';
+import { scheduleTimer } from '../core/lifecycle/timers.js';
+import { assertBrowserMethod } from '../adapters/method.js';
+import { AxiosHeaders } from '../headers/headers.js';
 import type { JsonParser, StandardSchema } from '../core/types.js';
 import { HttpError } from '../core/errors.js';
 import { validateStandardSchema } from '../core/schema.js';
@@ -5,13 +9,15 @@ import { raceWithSignal } from '../core/control.js';
 import type { HeaderInput } from '../headers/headers.js';
 import { mergeMethodHeaders } from '../headers/methods.js';
 import { combineSignals } from '../utils/signal.js';
-import { cancelBody, readResponse } from '../utils/response.js';
+import { cancelBody, readResponse, markResponseDecoded, markResponseMethod, awaitTransportResponse } from '../utils/response.js';
 
 export interface FetchJsonOptions extends Omit<RequestInit, 'headers'> {
   headers?: HeaderInput;
   cookie?: string;
   timeout?: number;
   timeoutMs?: number;
+  /** Throw HttpError on non-2xx status; defaults to false. */
+  throwHttpErrors?: boolean;
   /** Maximum response body size in bytes; defaults to unlimited. */
   maxBodySize?: number;
   fetch?: typeof globalThis.fetch;
@@ -41,6 +47,7 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
     timeout,
     timeoutMs,
     maxBodySize,
+    throwHttpErrors = false,
     fetch: injectedFetch,
     parseJson = (text) => JSON.parse(text),
     schema,
@@ -49,23 +56,48 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
     ...init
   } = options;
   const fetchImpl = injectedFetch ?? (globalThis as typeof globalThis & { fetch?: typeof globalThis.fetch }).fetch;
+  validateMaxBodySize(maxBodySize);
+  if (timeout !== undefined) validateTimeout(timeout, 'timeout');
+  if (timeoutMs !== undefined) validateTimeout(timeoutMs, 'timeoutMs');
   const effectiveTimeout = timeoutMs ?? timeout ?? 0;
+  const method = String(init.method ?? 'GET').toUpperCase();
+  assertBrowserMethod(method);
+  const startedAt = Date.now();
   const controller = effectiveTimeout > 0 ? new AbortController() : undefined;
-  const timer = controller ? setTimeout(() => controller.abort(), effectiveTimeout) : undefined;
+  const cancelTimer = controller ? scheduleTimer(() => controller.abort(), effectiveTimeout) : undefined;
   const combined = combineSignals([controller?.signal, signal ?? undefined]);
+  let receivedResponse: Response | undefined;
   try {
+    if (combined.signal?.aborted) throw combined.signal.reason;
     if (typeof fetchImpl !== 'function') {
       throw new HttpError('Fetch API is not available', { code: 'ERR_UNSUPPORTED_ADAPTER' });
     }
-    const response = await fetchImpl(url, {
+    const response = await awaitTransportResponse(fetchImpl(url, {
       ...init,
       signal: combined.signal,
-      headers: buildHeaders(headers, cookie, String(init.method ?? 'GET').toUpperCase()),
-    });
+      headers: buildHeaders(headers, cookie, method),
+    }), combined.signal);
+    receivedResponse = response;
+    markResponseDecoded(markResponseMethod(response, method));
+    if (!response.ok && throwHttpErrors) {
+      const completedAt = Date.now();
+      throw new HttpError(`Request failed with HTTP ${response.status}`, {
+        code: 'ERR_BAD_RESPONSE',
+        status: response.status,
+        response: {
+          data: null,
+          status: response.status,
+          statusText: response.statusText,
+          headers: new AxiosHeaders(response.headers),
+          config: { url: String(url), method, headers: buildHeaders(headers, cookie, method) },
+          raw: response,
+          protocol: 'unknown',
+          timings: { queuedAt: startedAt, startedAt, completedAt, duration: completedAt - startedAt },
+        },
+      });
+    }
     const bodylessStatus = response.status === 204 || response.status === 205 || response.status === 304;
-    const noBody = bodylessStatus
-      || String(init.method ?? 'GET').toUpperCase() === 'HEAD'
-      || response.headers.get('content-length') === '0';
+    const noBody = bodylessStatus || method === 'HEAD';
     if (!response.ok || noBody) {
       // `fetchJson` discards the Response it cannot use, so this path must
       // release the body itself. An unread body holds a connection open in
@@ -101,7 +133,8 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
     }
     return { data, status: response.status, response };
   } finally {
-    if (timer) clearTimeout(timer);
+    if (receivedResponse) cancelBody(receivedResponse);
+    cancelTimer?.();
     combined.cleanup();
   }
 }

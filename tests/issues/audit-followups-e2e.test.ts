@@ -62,18 +62,11 @@ test('e2e: a limited raw response keeps its url through the client', async () =>
   assert.equal(await response.text(), '12345');
 });
 
-test('e2e: a client-level maxBodySize null means unlimited', async () => {
-  const client = createHttpClient({
-    adapter: async () => new Response('12345', { status: 200 }),
-  });
-
-  const response = await client.get('/unlimited', {
-    responseType: 'response',
-    maxBodySize: null,
-  } as never) as Response;
-
-  assert.equal(response instanceof Response, true);
-  assert.equal(await response.text(), '12345');
+test('e2e: a client-level maxBodySize null is rejected', async () => {
+  const client = createHttpClient({ adapter: async () => new Response('12345') });
+  await assert.rejects(client.get('/invalid-limit', {
+    responseType: 'response', maxBodySize: null,
+  } as never), (error: unknown) => (error as { code?: string }).code === 'ERR_INVALID_CONFIG');
 });
 
 test('issue 4: aborting after a raw response is returned cancels its pending body read', async () => {

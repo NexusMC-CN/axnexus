@@ -1,3 +1,4 @@
+import { inheritCsrfPolicy } from '../security/csrf-policy.js';
 import { AxiosHeaders } from '../headers/headers.js';
 import { mergeMethodHeaders } from '../headers/methods.js';
 import type { InterceptorFulfilled, InterceptorRejected, RequestConfig, RequestInterceptorConfig } from './types.js';
@@ -30,7 +31,7 @@ function normalizeRequestConfig(config: RequestConfig, base?: RequestConfig): Re
   const headers = config.headers instanceof AxiosHeaders
     ? config.headers
     : mergeMethodHeaders(base?.headers as never, method, config.headers);
-  return { ...config, headers };
+  return inheritCsrfPolicy({ ...config, headers }, base);
 }
 
 /**
@@ -77,6 +78,17 @@ export async function applyInterceptorChain<T>(
   const guard = (): void => {
     if (signal?.aborted) throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
   };
+  // This context belongs to one chain invocation, not the shared manager.
+  // Rejected handlers receive an error instead of the previous config, but a
+  // recovered fresh config must retain that request's security provenance.
+  let lastRequest = manager instanceof RequestInterceptorManager ? value as RequestConfig : undefined;
+  const retainRequestPolicy = (next: T): T => {
+    if (lastRequest) {
+      inheritCsrfPolicy(next as RequestConfig, lastRequest);
+      lastRequest = next as RequestConfig;
+    }
+    return next;
+  };
   let chain: Promise<T> = Promise.resolve(value) as Promise<T>;
   for (const handler of handlers) {
     // The guard must cover the rejected path as well: a recovering handler
@@ -84,12 +96,12 @@ export async function applyInterceptorChain<T>(
     chain = chain.then(
       (current) => {
         guard();
-        return Promise.resolve(handler.fulfilled ? handler.fulfilled(current) : current);
+        return Promise.resolve(handler.fulfilled ? handler.fulfilled(current) : current).then(retainRequestPolicy);
       },
       handler.rejected
         ? (error: unknown) => {
           guard();
-          return Promise.resolve(handler.rejected!(error));
+          return Promise.resolve(handler.rejected!(error)).then(retainRequestPolicy);
         }
         : undefined,
     );

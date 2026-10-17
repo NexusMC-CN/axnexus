@@ -1,5 +1,5 @@
-import { isHttpError } from '../core/errors.js';
-import { AxiosHeaders, type HeaderInput } from '../headers/headers.js';
+import type { HeaderInput } from '../headers/headers.js';
+import { createQueryRedactor, normalizeHeaders, sanitizeRecordError } from './redaction.js';
 
 export interface RequestStartRecord {
   method: string;
@@ -26,6 +26,10 @@ export type RequestLogInput = Omit<RequestLogRecord, 'headers'> & {
 export interface RequestLoggerOptions {
   /** Additional header names to redact in addition to the built-in set. */
   redactHeaders?: string[];
+  /** Additional case-insensitive query names to redact in URLs and error messages. */
+  redactQueryParams?: readonly string[];
+  /** Receives the sanitized error; use to redact application-specific message secrets. */
+  redactError?: (error: unknown) => unknown;
   /** Clock used for lifecycle duration measurements. Defaults to Date.now. */
   now?: () => number;
 }
@@ -48,62 +52,6 @@ export interface RequestLogger {
   error(input: Omit<RequestLogInput, 'phase'>): void;
 }
 
-function normalizeHeaders(headers: HeaderInput | undefined, redact: Set<string>): Record<string, string> {
-  const output: Record<string, string> = {};
-  AxiosHeaders.from(headers).forEach((value, name) => {
-    // Header names are case-insensitive and `AxiosHeaders.normalize(true)` can
-    // re-case them to `Authorization`/`Cookie`; match on the lowercased name so
-    // a formatted instance cannot bypass redaction.
-    output[name] = redact.has(name.toLowerCase()) ? '[REDACTED]' : value;
-  });
-  return output;
-}
-
-function sanitizeError(error: unknown, redact: Set<string>): unknown {
-  if (isHttpError(error)) {
-    return {
-      name: error.name,
-      message: error.message,
-      code: error.code,
-      ...(error.status === undefined ? {} : { status: error.status }),
-      isAbort: error.isAbort,
-      isTimeout: error.isTimeout,
-      retryable: error.retryable,
-      ...(error.config ? {
-        config: {
-          method: error.config.method,
-          url: error.config.url,
-          headers: normalizeHeaders(error.config.headers, redact),
-        },
-      } : {}),
-    };
-  }
-
-  // Generic errors can carry arbitrary enumerable fields (including request
-  // configs). Keep the useful, stable fields and intentionally omit the rest.
-  if (error && typeof error === 'object') {
-    const source = error as Record<string, unknown>;
-    const output: Record<string, unknown> = {
-      name: typeof source.name === 'string' ? source.name : 'Error',
-    };
-    if (typeof source.message === 'string') output.message = source.message;
-    for (const key of ['code', 'status', 'isAbort', 'isTimeout', 'retryable']) {
-      const value = source[key];
-      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-        output[key] = value;
-      }
-    }
-    return output;
-  }
-
-  return error;
-}
-
-function sanitizeRecordError<T extends { error?: unknown }>(record: T, redact: Set<string>): T {
-  if (record.error === undefined) return record;
-  return { ...record, error: sanitizeError(record.error, redact) };
-}
-
 export function createRequestLogger(
   emit: (record: RequestLogRecord) => void,
   options: RequestLoggerOptions = {},
@@ -114,6 +62,7 @@ export function createRequestLogger(
     'set-cookie',
     ...(options.redactHeaders ?? []),
   ].map((name) => name.toLowerCase()));
+  const redactText = createQueryRedactor(options.redactQueryParams);
   const now = options.now ?? Date.now;
 
   const readNow = (): number => {
@@ -122,9 +71,10 @@ export function createRequestLogger(
   };
 
   const normalizeRecord = (input: RequestLogInput): RequestLogRecord => {
-    const sanitized = sanitizeRecordError(input, redact);
+    const sanitized = sanitizeRecordError(input, redact, redactText, options.redactError);
     return {
       ...sanitized,
+      ...(typeof input.url === 'string' ? { url: redactText(input.url) } : {}),
       ...(typeof input.method === 'string' ? { method: input.method.toUpperCase() } : {}),
       ...(input.headers ? { headers: normalizeHeaders(input.headers, redact) } : {}),
     } as RequestLogRecord;
@@ -147,17 +97,17 @@ export function createRequestLogger(
       const startedAt = readNow();
       let finished = false;
 
-      emit({ phase: 'start', method, url: input.url, headers });
+      emit({ phase: 'start', method, url: redactText(input.url), headers });
 
       const finish = (phase: 'complete' | 'error', record: RequestLifecycleInput = {}): void => {
         if (finished) return;
         finished = true;
         const duration = record.duration ?? Math.max(0, readNow() - startedAt);
         emit({
-          ...sanitizeRecordError(record, redact),
+          ...sanitizeRecordError(record, redact, redactText, options.redactError),
           phase,
           method,
-          url: input.url,
+          url: redactText(input.url),
           headers,
           duration,
         });

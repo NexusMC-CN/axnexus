@@ -1,4 +1,5 @@
 import { HttpError } from './errors.js';
+import { validateDelay } from './configuration/validation.js';
 import type { HttpResponse, ResolvedRequestConfig, RetryDelay, RetryOptions } from './types.js';
 
 export const DEFAULT_RETRY_ON = [408, 429, 500, 502, 503, 504];
@@ -8,7 +9,7 @@ export function retryAfterMs(response: HttpResponse<unknown> | undefined): numbe
   const raw = response?.headers.get('retry-after');
   if (typeof raw !== 'string' || !raw.trim()) return undefined;
   const seconds = Number(raw.trim());
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(Number.MAX_SAFE_INTEGER, seconds * 1000);
   const timestamp = Date.parse(raw);
   if (!Number.isFinite(timestamp)) return undefined;
   return Math.max(0, timestamp - Date.now());
@@ -37,7 +38,8 @@ export async function shouldRetry(
   delay: number,
 ): Promise<boolean> {
   // Caller cancellation and non-replayable bodies are always hard stops.
-  if (error.isAbort || isReadableStreamBody(config.body)) return false;
+  if (error.isAbort || isReadableStreamBody(config.body)
+    || error.code === 'ERR_INVALID_CONFIG' || error.code === 'ERR_UNSUPPORTED_METHOD') return false;
   if (typeof retry.shouldRetry === 'function') {
     return retry.shouldRetry({ error, retryCount, delay });
   }
@@ -71,15 +73,15 @@ export function calculateRetryDelay(
   error: HttpError,
 ): number {
   let delay = typeof retryDelay === 'function'
-    ? Math.max(0, Number(retryDelay(retryCount, error)) || 0)
-    : Math.max(0, Number(retryDelay) || 0) * retryCount;
+    ? validateDelay(retryDelay(retryCount, error), 'retryDelay result')
+    : Math.min(Number.MAX_SAFE_INTEGER, validateDelay(retryDelay ?? 0, 'retryDelay') * retryCount);
   const retryAfter = retry.respectRetryAfter === false ? undefined : retryAfterMs(error.response);
   if (retryAfter !== undefined) delay = retryAfter;
   const maxDelay = retry.maxDelay === undefined ? undefined : Math.max(0, retry.maxDelay);
   if (maxDelay !== undefined) delay = Math.min(delay, maxDelay);
   if (retry.jitter) {
     delay = typeof retry.jitter === 'function'
-      ? Math.max(0, Number(retry.jitter(delay, retryCount, error)) || 0)
+      ? validateDelay(retry.jitter(delay, retryCount, error), 'retry.jitter result')
       : Math.random() * delay;
   }
   if (maxDelay !== undefined) delay = Math.min(delay, maxDelay);

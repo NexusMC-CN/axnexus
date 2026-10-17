@@ -1,4 +1,5 @@
 import { HttpError } from '../core/errors.js';
+import { scheduleTimer } from '../core/lifecycle/timers.js';
 
 export interface RateLimitOptions {
   bytesPerSecond?: number;
@@ -17,7 +18,7 @@ interface Task<T> {
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
   sequence: number;
-  timer?: ReturnType<typeof setTimeout>;
+  timer?: () => void;
   settled: boolean;
   abort?: () => void;
   /** Set once the concurrency slot has been handed back. */
@@ -58,7 +59,7 @@ export class RateLimiter {
   private readonly states = new Map<string, LimitState>();
   private readonly groupMeta = new Map<string, GroupMeta>();
   /** A single coalesced wake-up timer for the whole scheduler. */
-  private wakeTimer?: ReturnType<typeof setTimeout>;
+  private wakeTimer?: () => void;
 
   constructor(options: RateLimitOptions = {}) {
     this.defaults = { ...options };
@@ -83,7 +84,7 @@ export class RateLimiter {
         const index = this.queue.indexOf(task as Task<unknown>);
         if (index >= 0) this.queue.splice(index, 1);
         task.settled = true;
-        if (task.timer) clearTimeout(task.timer);
+        task.timer?.();
         merged.signal?.removeEventListener('abort', abort);
         reject(new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true }));
         this.pump();
@@ -97,7 +98,7 @@ export class RateLimiter {
       }
       this.queue.push(task as Task<unknown>);
       if (merged.queueTimeout && merged.queueTimeout > 0) {
-        task.timer = setTimeout(() => {
+        task.timer = scheduleTimer(() => {
           if (task.settled) return;
           const index = this.queue.indexOf(task as Task<unknown>);
           if (index >= 0) this.queue.splice(index, 1);
@@ -165,14 +166,14 @@ export class RateLimiter {
       state.byteTokens = 0;
       state.byteUpdatedAt = now;
       await new Promise<void>((resolve, reject) => {
-        let timer: ReturnType<typeof setTimeout> | undefined;
+        let timer: (() => void) | undefined;
         const onAbort = () => {
-          if (timer) clearTimeout(timer);
+          timer?.();
           merged.signal?.removeEventListener('abort', onAbort);
           reject(new HttpError('Request canceled', { code: 'ERR_CANCELED', isAbort: true }));
         };
         if (merged.signal?.aborted) return onAbort();
-        timer = setTimeout(() => {
+        timer = scheduleTimer(() => {
           merged.signal?.removeEventListener('abort', onAbort);
           resolve();
         }, waitMs);
@@ -233,26 +234,21 @@ export class RateLimiter {
   /** Coalesce wake-ups: many queued tasks must not create many timers. */
   private scheduleWake(delayMs: number): void {
     if (this.wakeTimer) return;
-    this.wakeTimer = setTimeout(() => {
+    this.wakeTimer = scheduleTimer(() => {
       this.wakeTimer = undefined;
       this.pump();
     }, Math.max(1, delayMs));
-    // A queued task's only remaining reason to exist is this timer, so it must
-    // keep the event loop alive — otherwise the loop drains, the pending
-    // request never settles, and Node's test runner cancels it. Only unref once
-    // the queue is actually empty, so an idle limiter never holds a script open.
-    this.syncWakeRef();
+    this.syncWakeTimer();
   }
 
   /**
-   * Keep the wake-up timer anchored while tasks are queued, and release the
-   * event loop when nothing is waiting.
+   * Queued tasks keep their timer alive. Once the queue empties there is no
+   * remaining work to wake, so cancel it rather than holding the event loop.
    */
-  private syncWakeRef(): void {
-    if (!this.wakeTimer) return;
-    const timer = this.wakeTimer as { ref?: () => void; unref?: () => void };
-    if (this.queue.length > 0) timer.ref?.();
-    else timer.unref?.();
+  private syncWakeTimer(): void {
+    if (this.queue.length > 0) return;
+    this.wakeTimer?.();
+    this.wakeTimer = undefined;
   }
 
   private pump(): void {
@@ -261,7 +257,7 @@ export class RateLimiter {
     try {
       // Any queue mutation routes through here, so this is the one place that
       // must keep the wake-up timer in step with the queue.
-      this.syncWakeRef();
+      this.syncWakeTimer();
       this.evictIdleGroups(Date.now());
       while (this.queue.length) {
         this.queue.sort((a, b) => (Number(b.options.priority) || 0) - (Number(a.options.priority) || 0) || a.sequence - b.sequence);
@@ -305,7 +301,7 @@ export class RateLimiter {
         state.active += 1;
         this.touchGroup(key, now);
         task.settled = true;
-        if (task.timer) clearTimeout(task.timer);
+        task.timer?.();
         // A running task can hand its concurrency slot back early. This lets a
         // task whose network work is finished run user callbacks (such as
         // response interceptors or retry hooks) that may themselves need a
@@ -329,6 +325,7 @@ export class RateLimiter {
       }
     } finally {
       this.pumping = false;
+      this.syncWakeTimer();
     }
   }
 }

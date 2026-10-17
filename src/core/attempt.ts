@@ -1,6 +1,8 @@
+import { scheduleTimer } from './lifecycle/timers.js';
 import { AxiosHeaders } from '../headers/headers.js';
 import {
   cancelBody,
+  awaitTransportResponse,
   deferResponseBodyCleanup,
   readErrorPayload,
   markResponseMethod,
@@ -92,11 +94,11 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
   const externalSignal = attemptSignals.signal;
   const controller = externalSignal || timeoutMs > 0 || totalTimeoutEnabled ? new AbortController() : null;
   let timeoutTriggered = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelTimer: (() => void) | undefined;
   const onAbort = () => controller?.abort(externalSignal?.reason);
   if (externalSignal && controller) externalSignal.addEventListener('abort', onAbort, { once: true });
   if (timeoutMs > 0 && controller) {
-    timer = setTimeout(() => {
+    cancelTimer = scheduleTimer(() => {
       timeoutTriggered = true;
       controller.abort(TIMEOUT_REASON);
     }, timeoutMs);
@@ -110,6 +112,7 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
   }
   const startedAt = Date.now();
   let responseInterceptorChainStarted = false;
+  let receivedResponse: Response | undefined;
   let rawBodyResponse: Response | undefined;
   let returnedRawBody: Response | undefined;
   const keepsRawBody = (value: unknown): boolean => {
@@ -126,10 +129,11 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
       controller?.abort(reason);
       throw reason;
     }
-    const adapterOutput = await raceWithSignal(adapter(attemptConfig), attemptConfig.signal);
+    const adapterOutput = await awaitTransportResponse(adapter(attemptConfig), attemptConfig.signal);
     const rawResponse = adapterOutput instanceof Response
       ? adapterOutput
       : (adapterOutput as AdapterResult).response;
+    receivedResponse = rawResponse;
     // Tag the response with its request method so body handling can recognize a
     // HEAD probe, whose Content-Length describes the matching GET resource.
     markResponseMethod(rawResponse, attemptConfig.method);
@@ -310,8 +314,9 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     throw normalized;
   } finally {
     if (rawBodyResponse && !returnedRawBody) cancelBody(rawBodyResponse);
+    if (!returnedRawBody && receivedResponse) cancelBody(receivedResponse);
     const cleanup = () => {
-      if (timer) clearTimeout(timer);
+      cancelTimer?.();
       if (externalSignal && controller) externalSignal.removeEventListener('abort', onAbort);
       attemptSignals.cleanup();
     };

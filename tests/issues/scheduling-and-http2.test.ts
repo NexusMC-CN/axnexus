@@ -172,6 +172,13 @@ test('issue 53: the rate limiter exposes resource-group bookkeeping', () => {
 // pending but the event loop has already resolved". This reproduced on CI while
 // passing locally, so pin the timer's ref state directly.
 test('a queued task keeps the wake-up timer anchored on the event loop', async () => {
+  const nativeSetTimeout = globalThis.setTimeout;
+  let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+  globalThis.setTimeout = ((callback: () => void, delay: number) => {
+    const timer = nativeSetTimeout(callback, delay);
+    if (delay > 1000) wakeTimer = timer;
+    return timer;
+  }) as typeof setTimeout;
   const limiter = new RateLimiter({ requestsPerInterval: 1, interval: 5_000 });
   // Consume the only slot in this window so the next call must queue.
   await limiter.run(() => undefined);
@@ -179,16 +186,17 @@ test('a queued task keeps the wake-up timer anchored on the event loop', async (
   const controller = new AbortController();
   let ran = false;
   const queued = limiter.run(() => { ran = true; }, { signal: controller.signal });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const wakeTimer = (limiter as unknown as { wakeTimer?: { hasRef?: () => boolean } }).wakeTimer;
-  assert.notEqual(wakeTimer, undefined, 'a queued task must install a wake-up timer');
-  assert.equal(wakeTimer?.hasRef?.(), true, 'the wake-up timer must keep the event loop alive');
-  assert.equal(ran, false, 'the queued task must still be waiting');
-
-  // Cancel the queued task so no wake-up timer outlives this test.
-  controller.abort();
-  await queued.catch(() => undefined);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.notEqual(wakeTimer, undefined, 'a queued task must install a wake-up timer');
+    assert.equal(wakeTimer?.hasRef?.(), true, 'the wake-up timer must keep the event loop alive');
+    assert.equal(ran, false, 'the queued task must still be waiting');
+  } finally {
+    globalThis.setTimeout = nativeSetTimeout;
+    // Cancel the queued task so no wake-up timer outlives this test.
+    controller.abort();
+    await queued.catch(() => undefined);
+  }
 });
 
 // #25 — GOAWAY retires the session from the reuse pool.

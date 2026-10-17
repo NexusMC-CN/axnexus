@@ -30,7 +30,6 @@ export class ResponseCache<T = unknown> {
   private readonly entries = new Map<string, Entry<T>>();
   private readonly inflight = new Map<string, Promise<T>>();
   private generation = 0;
-  private readonly keyGenerations = new Map<string, number>();
   private readonly now: () => number;
   private readonly maxEntries: number;
 
@@ -73,17 +72,10 @@ export class ResponseCache<T = unknown> {
       this.generation += 1;
       this.entries.clear();
       this.inflight.clear();
-      // Invalidation generations are only meaningful for keys that were (or
-      // are about to be) stored. Dropping them with the entries keeps a
-      // long-lived cache from retaining metadata for every key ever cleared.
-      this.keyGenerations.clear();
       return;
     }
-    // Only record a generation for keys this cache actually knows about;
-    // otherwise every `clear` of an unknown key would leak a map entry.
-    if (this.entries.has(key) || this.inflight.has(key) || this.keyGenerations.has(key)) {
-      this.keyGenerations.set(key, (this.keyGenerations.get(key) ?? 0) + 1);
-    }
+
+    // Promise identity invalidates pending writers without retaining tombstones.
     this.entries.delete(key);
     this.inflight.delete(key);
   }
@@ -108,10 +100,9 @@ export class ResponseCache<T = unknown> {
     if (current) return current;
     const previous = this.entries.get(key);
     const generation = this.generation;
-    const keyGeneration = this.keyGenerations.get(key) ?? 0;
     const pending = loader().then((value) => {
       const expiresAt = this.now() + ttl;
-      if (generation === this.generation && keyGeneration === (this.keyGenerations.get(key) ?? 0)) {
+      if (generation === this.generation && this.inflight.get(key) === pending) {
         this.touch(key, { value: clone(value), expiresAt, staleUntil: expiresAt + staleWindow });
         while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
       }

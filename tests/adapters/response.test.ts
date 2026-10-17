@@ -9,12 +9,12 @@ test('enforces max response body size before parsing', async () => {
   );
 });
 
-test('treats omitted and invalid maxBodySize values as unlimited', async () => {
-  const response = new Response('12345');
-  assert.equal(await readResponse(response, 'text'), '12345');
-  assert.equal(await readResponse(new Response('12345'), 'text', -1), '12345');
-  assert.equal(await readResponse(new Response('12345'), 'text', Number.NaN), '12345');
-  assert.equal(await readResponse(new Response('12345'), 'text', Number.POSITIVE_INFINITY), '12345');
+test('only omitted maxBodySize is unlimited; invalid explicit values reject', async () => {
+  assert.equal(await readResponse(new Response('12345'), 'text'), '12345');
+  for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(readResponse(new Response('12345'), 'text', value),
+      (error: unknown) => error instanceof HttpError && error.code === 'ERR_INVALID_CONFIG');
+  }
 });
 
 test('treats all bodyless HTTP statuses as absent payloads', async () => {

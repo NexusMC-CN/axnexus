@@ -55,6 +55,8 @@ export type FetchPriority = 'high' | 'low' | 'auto';
 
 export interface CacheOptions {
   ttl?: number;
+  /** Session namespace required when caching requests that may carry ambient credentials. */
+  partition?: string;
 }
 
 export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'headers' | 'method' | 'signal'> {
@@ -66,6 +68,8 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
   baseURL?: string;
   params?: QueryParams;
   timeout?: number;
+  /** Enable automatic X-Request-Id generation for this request. Defaults to false. */
+  requestId?: boolean | (() => string);
   signal?: AbortSignal;
   retry?: number | RetryOptions;
   retryDelay?: RetryDelay;
@@ -95,7 +99,7 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
   onUploadProgress?: import('../transfer/progress.js').ProgressListener;
   onDownloadProgress?: import('../transfer/progress.js').ProgressListener;
   progressInterval?: number;
-  /** Maximum response payload size in bytes; omitted/invalid values mean unlimited. */
+  /** Maximum response payload size in bytes; omitted means unlimited. Must be a non-negative safe integer. */
   maxBodySize?: number;
   rateLimit?: import('../transfer/rate-limiter.js').RateLimitOptions;
 }

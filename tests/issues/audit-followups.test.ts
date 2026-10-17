@@ -90,27 +90,17 @@ test('raw limit: a limited raw response reports the size of the GET resource', a
   }
 });
 
-// --- Finding 3: a non-number maxBodySize must mean "unlimited". -----------
-
-test('raw limit: maxBodySize null, false and empty string do not impose a limit', async () => {
+// Explicit invalid limits now reject instead of silently disabling protection.
+test('raw limit: maxBodySize null, false and empty string reject', async () => {
   for (const value of [null, false, ''] as never[]) {
-    const response = new Response('12345', { status: 200 });
-    const result = await readResponse(response, 'response', value) as Response;
-    assert.equal(
-      result,
-      response,
-      `maxBodySize=${JSON.stringify(value)} must be treated as unlimited`,
-    );
-    assert.equal(await result.text(), '12345');
+    await assert.rejects(readResponse(new Response('12345'), 'response', value),
+      (error: unknown) => (error as { code?: string }).code === 'ERR_INVALID_CONFIG');
   }
 });
 
-test('raw limit: the buffered path agrees that null means unlimited', async () => {
-  const response = new Response('{"a":1}', {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
-  assert.deepEqual(await readResponse(response, 'json', null as never), { a: 1 });
+test('raw limit: the buffered path also rejects null', async () => {
+  await assert.rejects(readResponse(new Response('{"a":1}'), 'json', null as never),
+    (error: unknown) => (error as { code?: string }).code === 'ERR_INVALID_CONFIG');
 });
 
 test('raw limit: a real numeric limit is still enforced', async () => {

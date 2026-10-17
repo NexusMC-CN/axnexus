@@ -1,4 +1,5 @@
 import { HttpError } from '../core/errors.js';
+import { cancelBody } from '../utils/response.js';
 import type { AdapterConfig, AdapterResult, HttpAdapterFactory } from './types.js';
 
 export interface QuicResponse {
@@ -50,6 +51,20 @@ function cancelTransport(transport: QuicTransport, config: AdapterConfig): void 
   }
 }
 
+function discardResponse(value: Response | QuicResponse, reason?: unknown): void {
+  if (value instanceof Response) {
+    cancelBody(value, reason);
+    return;
+  }
+  if (value.body instanceof ReadableStream) {
+    try {
+      void value.body.cancel(reason).catch(() => undefined);
+    } catch {
+      // Disposal must not replace an already settled cancellation error.
+    }
+  }
+}
+
 export function createHttp3Adapter(transport?: QuicTransport): HttpAdapterFactory {
   if (!transport) throw new HttpError('HTTP/3 transport is not available', { code: 'ERR_UNSUPPORTED_ADAPTER' });
   return async (config: AdapterConfig): Promise<AdapterResult> => {
@@ -91,7 +106,10 @@ export function createHttp3Adapter(transport?: QuicTransport): HttpAdapterFactor
           return;
         }
         Promise.resolve(requestResult).then((value) => {
-          if (settled) return;
+          if (settled) {
+            discardResponse(value, signal?.reason);
+            return;
+          }
           settled = true;
           cleanup();
           resolve(value);

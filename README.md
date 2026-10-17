@@ -46,9 +46,11 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 });
 ```
 
-默认凭据策略是 `include`，默认自动添加 `Accept: application/json` 和 `X-Request-Id`。调用方显式传入同名请求头时会保留调用方的值。
+默认凭据策略是 `same-origin`，自动添加 `Accept: application/json`，默认不生成 `X-Request-Id`。调用方显式传入同名请求头时会保留调用方的值。客户端或单次请求设置 `requestId: true` 可开启 ID，也可传入工厂函数；同一逻辑请求的重试复用同一 ID。
 
-`include` 允许浏览器跨源请求携带凭据，服务端必须正确配置 CORS 和 `Access-Control-Allow-Credentials`；需要原生 Fetch 的 `same-origin` 行为时请显式传入 `credentials`。
+跨源鉴权需要显式设置 `credentials: 'include'`，服务端须正确配置 CORS 和 `Access-Control-Allow-Credentials`。公开 API 可设置 `credentials: 'omit'`。升级到 `0.2.0` 时，依赖跨源 Cookie 或自动请求 ID 的调用方需要显式开启相应选项；其他兼容性变化见[变更记录](./CHANGELOG.md)。
+
+`trace` 和 `connect` 便捷方法保留给支持相应方法的自定义 adapter。内置 Fetch（包括 Node Fetch）和 XHR 会在发送前抛出 `ERR_UNSUPPORTED_METHOD`，不会把它们当作网络故障重试。
 
 ## Headers
 
@@ -81,7 +83,7 @@ const result = await http.get('/items', {
 });
 ```
 
-`params` 使用 `URLSearchParams` 编码，数组会生成重复的 query key，`null` 和 `undefined` 会被跳过。相对路径会与 `baseURL` 合并；如果不允许绝对 URL，可以设置 `allowAbsoluteURL: false`。
+`params` 使用 `URLSearchParams` 编码，数组会生成重复的 query key，`null` 和 `undefined` 会被跳过。相对路径会与 `baseURL` 合并；如果不允许绝对 URL，可以设置 `allowAbsoluteURL: false`。URL 和 `baseURL` 中的控制字符会被拒绝，避免 TAB、换行等字符经浏览器规范化后绕过地址策略。
 
 客户端缓存使用 `cache: { ttl }` 或 `cache: false`；如果需要把原生 Fetch 的缓存模式传给 adapter，请使用 `fetchCache`（或等价的 `requestCache`），例如 `fetchCache: 'no-store'`。`dispatcher` 和 `agent` 只在 Node 运行时透传；`duplex`、`priority` 和 `window` 按运行环境支持情况使用。`ReadableStream` 请求体会自动设置 `duplex: 'half'`，Bun 的专有 Fetch 选项不会自动混入通用配置。
 
@@ -107,7 +109,9 @@ JSON（包括自定义 `parseJson`）解析失败抛出 `ERR_BAD_PAYLOAD`，`tra
 
 `validateStatus` 或 `throwHttpErrors` 回调自身抛错时返回 `ERR_INVALID_STATUS_POLICY`，并且不会当作可重试的网络错误重发请求。
 
-`maxBodySize` 以字节为单位，默认不限制；负数、`NaN`、`Infinity` 及非数字值也按不限制处理。它会先检查响应的 `Content-Length`（HEAD 与 `204`/`205`/`304` 除外）；可读流按块累计，超过上限会立即停止读取并取消底层响应体；没有可读流的响应只能在运行时完成缓冲后检查大小。`responseType: 'response'` 返回的响应仍保留 `url`、`redirected` 和 `type` 等 metadata。
+`maxBodySize` 以字节为单位，仅省略或 `undefined` 表示不限制；显式值必须是非负安全整数，`0` 只允许空体，负数、小数、`NaN`、`Infinity`、`null` 和非数字值抛出 `ERR_INVALID_CONFIG`。可读流按块累计，超限后立即取消底层响应体；没有可读流时只能在运行时缓冲后检查。Fetch 已解压的响应按解压后的实际字节限制，不用压缩 `Content-Length` 误判；原始传输按其暴露的字节限制。HEAD 与 `204`/`205`/`304` 不按声明长度计算。`responseType: 'response'` 保留 `url`、`redirected` 和 `type` 等 metadata。
+
+`timeout`、`totalTimeout` 和重试次数也会校验显式配置；超时必须是非负安全整数，`0` 表示关闭，重试次数必须是非负安全整数。延迟、最大延迟及延迟回调结果必须是有限非负数，且不超过 `Number.MAX_SAFE_INTEGER`。非法配置抛出 `ERR_INVALID_CONFIG`，不按网络错误重试；超过单个 timer 上限的合法等待会分段调度。
 
 `transformRequest` 和 `stringifyJson` 可用于接入自定义序列化协议，任一请求转换或序列化钩子失败都会抛出 `ERR_TRANSFORM_REQUEST`。
 
@@ -207,10 +211,12 @@ try {
 | `ERR_TRANSFORM_RESPONSE` | 响应转换钩子抛出异常 |
 | `ERR_SCHEMA_VALIDATION` | 响应未通过 Standard Schema 校验 |
 | `ERR_INVALID_HEADER` | header 名称或值包含非法字符 |
+| `ERR_INVALID_CONFIG` | 显式传入的配置值或 URL 无效 |
 | `ERR_INVALID_STATUS_POLICY` | 状态策略回调抛出异常 |
 | `ERR_MAX_BODY_SIZE` | 响应体超过 `maxBodySize` |
 | `ERR_RATE_LIMIT_QUEUE_TIMEOUT` | 请求在限速队列中超时 |
 | `ERR_UNSUPPORTED_ADAPTER` | 当前环境不支持所选 adapter |
+| `ERR_UNSUPPORTED_METHOD` | 所选 adapter 不支持该 HTTP 方法 |
 | `ERR_PROTOCOL_NEGOTIATION` | transport 无法协商请求的协议 |
 
 ## 取消和超时
@@ -226,7 +232,9 @@ controller.abort();
 await pending;
 ```
 
-`timeout` 约束单次 adapter 尝试，包括响应体读取和响应拦截器等待；`totalTimeout` 从进入限速队列前开始计时，还覆盖排队、重试判断、退避等待以及所有尝试。二者超时都会抛出 `ETIMEDOUT`。
+`timeout` 约束单次 adapter 尝试，包括响应体读取和响应拦截器等待；`totalTimeout` 从进入公开请求方法时开始计时，覆盖首次异步请求拦截器、`transformRequest`、排队、重试判断、退避等待以及所有尝试。总预算由调用时的请求配置或客户端默认值确定，拦截器不会重新启动这份预算。二者超时都会抛出 `ETIMEDOUT`。超时或取消后才返回的 adapter 响应会被主动释放。
+
+超时、退避、限速等待和分块重试使用分段计时，超过运行时 32 位计时器范围的等待不会溢出为立即执行；相对等待使用单调时钟，不受系统时间回拨影响。
 
 外部取消会抛出 `ERR_CANCELED`，并会尽早结束仍在等待的请求拦截器、请求转换器、限速排队、adapter、响应体读取和响应拦截器。单次超时与外部取消竞争时，以先触发者为准；总超时计时器已经触发时返回 `ETIMEDOUT`。取消请求不会自动重试。自定义 adapter 和异步回调仍需主动响应 signal，才能停止已经开始的底层操作。
 
@@ -303,6 +311,7 @@ http.interceptors.response.use(undefined, (error) => {
 ```typescript
 const cachedHttp = createHttpClient({
   baseURL: 'https://api.example.com',
+  credentials: 'omit',
   cache: { ttl: 30_000 },
 });
 
@@ -313,16 +322,21 @@ await cachedHttp.get('/catalog', { bypassCache: true });
 cachedHttp.clearCache();
 ```
 
-缓存只作用于 GET。请求 key 包含 method、最终 URL、规范化请求头（自动生成的 `X-Request-Id` 除外）、`responseType` 以及 `credentials`、`mode`、`redirect`、`referrer`、`referrerPolicy`、`integrity` 和 `keepalive` 等 Fetch 行为选项。相同 key 的进行中请求会共享一次 adapter 调用。
+缓存只作用于 GET。请求拦截器执行后按最终 URL、headers、响应类型、凭据及 Fetch 行为选项生成 key，自动生成的请求 ID 除外。缓存保存响应字节快照，每个调用方分别执行解析、schema、转换和响应拦截器；命中缓存也不会跳过这些处理。相同 key 的网络请求可以去重，各调用方的取消、单次超时和总时限独立；全部等待者退出后取消共享传输。
 
-以下请求会跳过客户端缓存与进行中请求去重，以保留各调用方的控制策略：
+携带潜在自动 Cookie 的请求（包括默认的 `same-origin`）必须指定会话分区，才能进入结果缓存或共享网络请求；公开数据建议使用 `credentials: 'omit'`：
 
-- 带 `signal`，或启用了 `timeout` / `totalTimeout`。
-- 设置了 `maxBodySize`、`onDownloadProgress`、`rateLimit`、`schema`、`parseJson`、`transformResponse`、`validateStatus`、`throwHttpErrors`、`dispatcher` 或 `agent`，或包含请求体。
-- 请求级 `retry`、`retryOn` 或 `retryDelay` 与客户端默认值不一致。
-- 所属实例注册了请求或响应拦截器。
+```typescript
+await http.get('/me', {
+  cache: { ttl: 5_000, partition: `session:${sessionVersion}` },
+});
+```
 
-非 GET 请求只要被发出过就会清空当前实例缓存——即使响应解析或校验随后失败，因为服务端可能已经应用了这次写入。缓存保存在内存中，不跨实例或持久化；`GetRequestCache` 默认最多保留 512 条、单条超过约 1 MB 的结果不入缓存，并提供 `prune()` 主动回收过期条目。
+分区应在登录、退出或切换用户时改变，并调用 `clearCache()` 释放旧条目；SSR 应创建请求级客户端。显式 Authorization/Cookie 也参与 key。仅设置 `credentials` 字符串不能区分 HttpOnly Cookie 的会话。
+
+`signal`、超时和拦截器本身不会禁用缓存。完整响应接口、raw Response、请求体，以及请求级 `maxBodySize`、上传/下载进度、限速、`dispatcher` 或 `agent` 仍会保守跳过共享。非 2xx、`Cache-Control: no-store` 和 `Vary: *` 响应不保留 TTL 条目；客户端缓存不是完整的浏览器 HTTP cache。
+
+实际发出的非 GET 请求会清空当前实例缓存，包括重试时从 GET 改成 POST 的情况；这些请求即使在响应解析或校验阶段失败，也会清空缓存。缓存保存在内存中，不跨实例或持久化；`GetRequestCache` 默认最多保留 512 条，单条超过约 1 MB 不保留，并提供 `prune()` 主动回收过期条目。字符串、Blob 和二进制值按字节估算，二进制视图按完整底层 buffer 计量；Map/Set 递归估算，无法估算的对象不驻留。失效元数据也会回收。
 
 ### stale-while-revalidate 响应缓存
 
@@ -341,13 +355,13 @@ const data = await cache.getOrLoad('catalog', loadCatalog, {
 
 `maxEntries` 限制条目数量，默认是 `256`。写入和读取都会优先使用 `structuredClone`，再回退到 JSON clone；后者可能丢失 `Date`、`Map` 等类型信息。两种方式都不支持的值会按原引用返回，因此缓存值应视为不可变数据。没有公开的 clone 开关。
 
-直接使用 `GetRequestCache` 时，`options.signal` 只取消当前调用方的等待，不取消共享 loader。`ResponseCache` 本身不提供调用方取消选项，loader 的取消策略由调用方管理。
+直接使用 `GetRequestCache` 时，`options.signal` 只取消当前调用方的等待；全部等待者退出后，共享 loader 收到的 signal 会取消。`ResponseCache` 本身不提供调用方取消选项，loader 的取消策略由调用方管理。
 
 ## SSR 和一次性 JSON 请求
 
 `fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求。它支持显式传入 `cookie`、注入 `fetch` 和 JSON parser；`headers` 接受与主客户端相同的 `HeaderInput`（包括 `AxiosHeaders`），`maxBodySize` 默认不限制响应体。`timeout` 和 `timeoutMs` 都可用，同时提供时以 `timeoutMs` 为准。
 
-它不会继承 `createHttpClient` 的 `credentials: 'include'` 默认值；浏览器需要跨源凭据时显式传入 `credentials: 'include'`，服务端转发 Cookie 时使用 `cookie`。
+它采用原生 Fetch 的凭据策略；浏览器需要跨源凭据时显式传入 `credentials: 'include'`，服务端转发 Cookie 时使用 `cookie`。
 
 ```typescript
 import { fetchJson } from '@nexusmc-cn/axnexus';
@@ -358,7 +372,7 @@ const data = await fetchJson<{ ok: boolean }>('https://api.example.test/health',
 });
 ```
 
-非 2xx 状态不会自动抛错，而是返回 `null`；`204`、`205`、`304`、`HEAD`、`Content-Length: 0`、空字节或只有空白字符的响应同样返回 `null`。需要状态码和原始响应时使用 `fetchJsonResult`：
+默认非 2xx 返回 `null`，保持原有行为；设置 `throwHttpErrors: true` 后抛出带 status/response 的 `HttpError`。成功的 JSON `null`、`204`、`205`、`HEAD`、`Content-Length: 0`、空字节或只有空白字符的响应仍返回 `null`；304 默认返回 `null`，开启抛错时作为非 2xx 处理。需要状态码和响应元数据时使用 `fetchJsonResult`：
 
 ```typescript
 import { fetchJsonResult } from '@nexusmc-cn/axnexus';
@@ -430,7 +444,7 @@ try {
 | `responseBytes` | 可选的响应字节数 |
 | `error` | 错误摘要，裁剪任意附加字段并脱敏 `HttpError.config.headers` |
 
-`start()` 返回的句柄只结束自己的生命周期，且只记录一次；顶层 `logger.complete()` 和 `logger.error()` 是 `record()` 的快捷方式，不会结束已有句柄。通过 `redactHeaders` 可追加需要脱敏的 header 名称。URL 和错误消息会按原文保留，记录前应避免在其中放入凭据。
+`start()` 返回的句柄只结束自己的生命周期，且只记录一次；顶层 `logger.complete()` 和 `logger.error()` 是 `record()` 的快捷方式，不会结束已有句柄。`redactHeaders` 可追加敏感 header；URL、错误消息和 `HttpError.config.url` 默认过滤 token、access_token、key、api_key、secret、password、signature 等敏感 query，支持编码和重复参数，普通参数保留。使用 `redactQueryParams: ['ticket']` 追加字段，或通过 `redactError: (sanitizedError) => ...` 处理业务错误中的其他敏感内容。
 
 ## CSRF
 
@@ -446,7 +460,9 @@ const csrf = createCsrfInterceptor({
 http.interceptors.request.use(csrf);
 ```
 
-默认只处理 `POST`、`PUT`、`PATCH` 和 `DELETE`，显式设置的 header 优先于 reader 返回的 token。
+默认只处理 `POST`、`PUT`、`PATCH` 和 `DELETE`，信任浏览器同源及客户端 `baseURL` 的 origin；合法跨源 API 使用 `allowedOrigins: ['https://api.example.com']` 显式允许。最终发送前会再次检查目标地址，后续拦截器改写外站 URL 时会移除自动注入的 token；`credentials: 'omit'` 不控制显式 header，因此不能代替 origin 校验。
+
+自动 token 的来源保存在私有元数据中，不发送内部标记；reader 清空后重试会移除旧 token。显式设置的 header 优先，调用方负责其发送范围。自动 token 请求禁止自动跟随重定向（`redirect: 'error'`，显式 `manual` 保留）；XHR 无法控制重定向，因此拒绝这种请求并返回 `ERR_UNSUPPORTED_ADAPTER`，应使用 Fetch。自定义 adapter 应遵守 `redirect` 配置。
 
 ## HTTP/2 和 HTTP/3
 
@@ -509,17 +525,6 @@ const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) })
 | HTTP/3 | 浏览器自行协商 | 浏览器自行协商 | 默认不启用 | 不适用 | `@nexusmc-cn/axnexus/node-http3` + QUIC transport |
 
 Node.js HTTP/2 和 HTTP/3 入口不会被默认入口加载。
-
-## 开发
-
-```bash
-npm install
-npm test
-npm run build
-npm run test:bun
-```
-
-贡献代码时，`npm test` 使用 Node.js 执行测试；`npm run test:bun` 需要本机已安装 Bun。两者都会先生成最新的 `dist/`。仓库 CI 使用 Node.js 22 和 Bun 1.4.2，运行测试需使用支持对应测试命令的运行时。
 
 ## 许可证
 

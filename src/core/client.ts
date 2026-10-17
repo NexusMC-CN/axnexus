@@ -3,12 +3,14 @@ import { RateLimiter } from '../transfer/rate-limiter.js';
 import { createInterceptorManager, createRequestInterceptorManager } from './interceptors.js';
 import { buildFetchAdapter, createRequestId } from './config.js';
 import { runRequestPipeline, type RequestPipelineDeps } from './pipeline.js';
+import { validateRequestOptions } from './configuration/validation.js';
 import type { HttpAdapter, HttpClient, HttpClientConfig, HttpResponse, RequestConfig } from './types.js';
 
 export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
+  validateRequestOptions(options);
   const defaults: HttpClientConfig = {
-    credentials: 'include',
-    requestId: true,
+    credentials: 'same-origin',
+    requestId: false,
     ...options,
   };
   const adapter = defaults.adapter || buildFetchAdapter();
@@ -29,8 +31,10 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     releaseAdapterStream,
   };
 
-  const requestInternal = <T>(input: RequestConfig, fullResponse: boolean): Promise<T | HttpResponse<T>> =>
-    runRequestPipeline<T>(input, fullResponse, pipelineDeps);
+  const requestInternal = async <T>(input: RequestConfig, fullResponse: boolean): Promise<T | HttpResponse<T>> => {
+    validateRequestOptions(input);
+    return runRequestPipeline<T>(input, fullResponse, pipelineDeps);
+  };
 
   const normalizePublicConfig = (input: RequestConfig | string, config?: RequestConfig): RequestConfig =>
     typeof input === 'string' ? { ...(config ?? {}), url: input } : input;

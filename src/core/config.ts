@@ -6,6 +6,8 @@ import { mergeMethodHeaders, type HeaderDefaults } from '../headers/methods.js';
 import type { RateLimitOptions } from '../transfer/rate-limiter.js';
 import { encodeBody } from '../utils/body.js';
 import { signalReason } from './control.js';
+import { validateRequestOptions, validateRetryOptions, validateTimeout } from './configuration/validation.js';
+import { finalizeCsrfConfig } from '../security/csrf.js';
 import type {
   HttpAdapter,
   HttpClientConfig,
@@ -34,6 +36,8 @@ export function mergeRateLimitOptions(
 }
 
 export function normalizeRetry(value: number | RetryOptions | undefined, fallback: number | RetryOptions | undefined): RetryOptions {
+  validateRetryOptions(value);
+  validateRetryOptions(fallback);
   const base: RetryOptions = typeof fallback === 'number'
     ? { limit: Math.max(0, Math.floor(Number(fallback) || 0)) }
     : fallback && typeof fallback === 'object'
@@ -70,7 +74,7 @@ export function resolveFetchCache(
 }
 
 export function normalizeTimeout(value: number | undefined): number {
-  return Number.isFinite(value) && Number(value) > 0 ? Number(value) : 0;
+  return validateTimeout(value);
 }
 
 export async function applyRequestTransforms(
@@ -111,13 +115,17 @@ export async function createResolvedConfig(
   headersAlreadyMerged = false,
   signal?: AbortSignal,
 ): Promise<ResolvedRequestConfig> {
+  validateRequestOptions(defaults);
+  validateRequestOptions(request);
   const method = String(request.method || 'GET').toUpperCase();
   const baseURL = request.baseURL ?? defaults.baseURL ?? '';
   const allowAbsoluteURL = request.allowAbsoluteURL ?? defaults.allowAbsoluteURL ?? true;
-  const url = appendQuery(
-    resolveURL(baseURL, request.url || '', allowAbsoluteURL),
-    request.params,
-  );
+  let url: string;
+  try {
+    url = appendQuery(resolveURL(baseURL, request.url || '', allowAbsoluteURL), request.params);
+  } catch (cause) {
+    throw new HttpError('Invalid request URL or query parameters', { code: 'ERR_INVALID_CONFIG', cause });
+  }
   // Request interceptors receive the already merged AxiosHeaders instance.
   // Keep that object authoritative so an interceptor can intentionally delete
   // a client default instead of having it restored on the next merge.
@@ -177,7 +185,7 @@ export async function createResolvedConfig(
     }
   }
   const fetchCache = resolveFetchCache(defaults, request);
-  return {
+  return finalizeCsrfConfig({
     ...defaults,
     ...request,
     ...(fetchCache === undefined ? {} : { fetchCache, requestCache: fetchCache }),
@@ -186,7 +194,7 @@ export async function createResolvedConfig(
     url,
     headers,
     body,
-  } as ResolvedRequestConfig;
+  } as ResolvedRequestConfig);
 }
 
 export function buildFetchAdapter(): HttpAdapter {

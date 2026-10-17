@@ -443,6 +443,7 @@ test('merges request retry objects with client defaults and preserves explicit d
 test('does not share cached data between response types', async () => {
   let reads = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1_000 },
     adapter: async (config) => {
       reads += 1;
@@ -463,6 +464,7 @@ test('request cancellation does not wait on a shared cached loader', async () =>
   const started = new Promise<void>((resolve) => { adapterStarted = resolve; });
   let reads = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1_000 },
     adapter: async (config) => {
       reads += 1;
@@ -485,6 +487,7 @@ test('request cancellation does not wait on a shared cached loader', async () =>
 test('does not cache GET responses when body limits, progress, or rate limits are request-specific', async () => {
   let reads = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1_000 },
     adapter: async () => {
       reads += 1;

@@ -1,6 +1,6 @@
 {
   "name": "@nexusmc-cn/axnexus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A small, typed, fetch-based HTTP client with Axios-style instances.",
   "license": "MIT",
   "repository": {
@@ -12,10 +12,25 @@
     "url": "https://github.com/NexusMC-CN/axnexus/issues"
   },
   "keywords": [
-    "http",
     "fetch",
+    "request",
+    "http",
+    "https",
+    "http-client",
+    "network",
+    "ajax",
+    "api",
+    "rest",
+    "xhr",
+    "browser",
+    "nodejs",
+    "bun",
     "typescript",
-    "http-client"
+    "axios",
+    "retry",
+    "timeout",
+    "cache",
+    "abortcontroller"
   ],
   "publishConfig": {
     "access": "public",
@@ -40,7 +55,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",

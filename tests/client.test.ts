@@ -64,7 +64,7 @@ test('builds a JSON request and returns parsed data', async () => {
   assert.equal(requests[0].url, 'https://api.example.test/v1/users?active=true&tag=one&tag=two');
   assert.equal(requests[0].method, 'POST');
   assert.equal(requests[0].headers.get('content-type'), 'application/json');
-  assert.match(requests[0].headers.get('x-request-id') || '', /^[0-9a-f-]{8,}$/i);
+  assert.equal(requests[0].headers.get('x-request-id'), null);
   assert.equal(requests[0].body, JSON.stringify({ name: 'Ada' }));
 });
 
@@ -413,6 +413,7 @@ test('retries idempotent requests and reuses the request id', async () => {
   let attempts = 0;
   const requestIds: string[] = [];
   const client = createHttpClient({
+    requestId: true,
     retry: 2,
     retryDelay: 0,
     adapter: async (config) => {
@@ -425,6 +426,7 @@ test('retries idempotent requests and reuses the request id', async () => {
 
   await assert.doesNotReject(client.get('/retry'));
   assert.equal(attempts, 3);
+  assert.ok(requestIds[0]);
   assert.equal(new Set(requestIds).size, 1);
 });
 
@@ -802,6 +804,7 @@ test('keeps the original error when onRequestError throws', async () => {
 test('does not cache raw Response objects', async () => {
   let reads = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1000 },
     adapter: async () => {
       reads += 1;
@@ -876,6 +879,7 @@ test('normalizes cancellation during a retry delay and notifies once', async () 
 test('deduplicates GET requests and clears cache after mutation', async () => {
   let reads = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1000 },
     adapter: async () => {
       reads += 1;
@@ -899,6 +903,7 @@ test('deduplicates GET requests and clears cache after mutation', async () => {
 test('does not cache GET requests with a body or data payload', async () => {
   let reads = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1000 },
     adapter: async (config) => {
       reads += 1;
@@ -913,10 +918,11 @@ test('does not cache GET requests with a body or data payload', async () => {
   assert.equal(reads, 2);
 });
 
-test('does not cache responses when response interceptors are registered', async () => {
+test('reruns response interceptors on cached response snapshots', async () => {
   let reads = 0;
   let intercepted = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1_000 },
     adapter: async () => {
       reads += 1;
@@ -929,14 +935,15 @@ test('does not cache responses when response interceptors are registered', async
   });
 
   assert.deepEqual(await client.get('/cache-response-interceptor'), { reads: 1, intercepted: 1 });
-  assert.deepEqual(await client.get('/cache-response-interceptor'), { reads: 2, intercepted: 2 });
-  assert.equal(reads, 2);
+  assert.deepEqual(await client.get('/cache-response-interceptor'), { reads: 1, intercepted: 2 });
+  assert.equal(reads, 1);
 });
 
-test('does not cache requests when request interceptors can change the effective URL during retry', async () => {
+test('keys cached snapshots by each retry effective URL', async () => {
   let reads = 0;
   let interceptorRuns = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1_000 },
     retry: 1,
     retryDelay: 0,
@@ -963,6 +970,7 @@ test('does not cache requests when request interceptors can change the effective
 test('includes caller-provided request ids in the cache key', async () => {
   let reads = 0;
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1_000 },
     adapter: async (config) => {
       reads += 1;

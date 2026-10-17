@@ -4,6 +4,7 @@ import { createHttpClient } from '../../dist/index.js';
 
 test('returns full response metadata without changing data convenience methods', async () => {
   const client = createHttpClient({
+    credentials: 'omit',
     cache: { ttl: 1000 },
     adapter: async () => new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } }),
   });

@@ -1,8 +1,9 @@
+import { assertBrowserMethod } from './method.js';
 import type { AdapterConfig, HttpAdapterFactory } from './types.js';
 import type { FetchPriority } from '../core/types.js';
 import { HttpError } from '../core/errors.js';
 import { ProgressTracker, trackReadableStream } from '../transfer/progress.js';
-import { markResponseMethod } from '../utils/response.js';
+import { markResponseMethod, markResponseDecoded, copyResponseBodyMetadata } from '../utils/response.js';
 
 function contentLength(response: Response): number | undefined {
   const raw = response.headers.get('content-length');
@@ -75,6 +76,7 @@ function proxyResponseMetadata(source: Response, target: Response): Response {
 
 export function createFetchAdapter(fetchImpl?: typeof globalThis.fetch): HttpAdapterFactory {
   return async (config: AdapterConfig) => {
+    assertBrowserMethod(config.method);
     const runtimeFetch = fetchImpl ?? (globalThis as typeof globalThis & { fetch?: typeof globalThis.fetch }).fetch;
     if (typeof runtimeFetch !== 'function') {
       throw new HttpError('Fetch API is not available', { code: 'ERR_UNSUPPORTED_ADAPTER' });
@@ -118,6 +120,7 @@ export function createFetchAdapter(fetchImpl?: typeof globalThis.fetch): HttpAda
     // Tag the response so downstream body handling recognizes a HEAD probe
     // whose Content-Length describes the matching GET resource.
     markResponseMethod(response, config.method);
+    markResponseDecoded(response);
     const headers = new Headers(response.headers);
     const bodyless = hasNoResponseBody(response.status, config.method);
     if (!response.body) {
@@ -156,7 +159,7 @@ export function createFetchAdapter(fetchImpl?: typeof globalThis.fetch): HttpAda
       statusText: response.statusText,
       headers,
     });
-    return proxyResponseMetadata(response, wrapped);
+    return copyResponseBodyMetadata(response, proxyResponseMetadata(response, wrapped));
   };
 }
 

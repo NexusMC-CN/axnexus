@@ -3,7 +3,10 @@ import { AxiosHeaders } from '../headers/headers.js';
 import { RateLimiter } from '../transfer/rate-limiter.js';
 import { applyInterceptorChain, type InterceptorManager, type RequestInterceptorManager } from './interceptors.js';
 import { executeAttempt } from './attempt.js';
-import { resolveCachePolicy } from './cache-policy.js';
+import { resolveCachePolicy } from '../cache/policy.js';
+import { snapshotAdapter } from '../cache/snapshot-adapter.js';
+import { scheduleTimer } from './lifecycle/timers.js';
+import { validateRequestOptions, validateTimeout } from './configuration/validation.js';
 import {
   createRequestId,
   createResolvedConfig,
@@ -54,9 +57,20 @@ export async function runRequestPipeline<T>(
     rateLimiter,
     releaseAdapterStream,
   } = deps;
+  validateRequestOptions(input);
+  const queuedAt = Date.now();
+  const totalTimeoutMs = validateTimeout(input.totalTimeout ?? defaults.totalTimeout, 'totalTimeout');
+  const totalController = totalTimeoutMs > 0 ? new AbortController() : null;
+  let totalTimeoutTriggered = false;
+  const totalTimer = totalController ? scheduleTimer(() => {
+    totalTimeoutTriggered = true;
+    totalController.abort(TIMEOUT_REASON);
+  }, totalTimeoutMs) : undefined;
+  let invalidatesCache = false;
+  let releaseAtEnd = false;
   let resolved: ResolvedRequestConfig | undefined;
   let interceptedConfig: RequestConfig | undefined;
-  const requestIdEnabled = defaults.requestId ?? true;
+  const requestIdEnabled = input.requestId ?? defaults.requestId ?? false;
   let stableRequestId = '';
   let generatedRequestIdForCache: string | undefined;
   let notified = false;
@@ -69,6 +83,7 @@ export async function runRequestPipeline<T>(
     defaults.signal,
     input.signal,
     setupRateLimit?.signal,
+    totalController?.signal,
   ]);
   const notifyError = (error: HttpError) => {
     if (notified) return;
@@ -93,7 +108,10 @@ export async function runRequestPipeline<T>(
     const fallbackWasGenerated = Boolean(requestIdEnabled && !initialRequestIdPresent && fallbackRequestId);
     if (fallbackRequestId) initialHeaders.set('X-Request-Id', fallbackRequestId);
     interceptedConfig = await raceWithSignal(
-      applyInterceptorChain(requestInterceptors, { ...input, headers: initialHeaders }, {
+      applyInterceptorChain(requestInterceptors, {
+        baseURL: defaults.baseURL, allowAbsoluteURL: defaults.allowAbsoluteURL,
+        credentials: defaults.credentials, ...input, headers: initialHeaders,
+      }, {
         signal: setupSignals.signal,
       }),
       setupSignals.signal,
@@ -101,6 +119,7 @@ export async function runRequestPipeline<T>(
     // Normalize interceptor output through the same method-aware merge path.
     // A plain object can contain differently-cased copies of the same header;
     // constructing a native Headers object would concatenate those values.
+    validateRequestOptions(interceptedConfig);
     const interceptedHeaders = AxiosHeaders.from(interceptedConfig.headers);
     const interceptedRequestIdPresent = interceptedHeaders.has('X-Request-Id');
     const interceptedRequestIdDisabled = interceptedHeaders.isDisabled('X-Request-Id');
@@ -146,11 +165,7 @@ export async function runRequestPipeline<T>(
     ).filter(Number.isFinite));
     const retryUnsafeMethods = initialResolved.retryUnsafeMethods ?? defaults.retryUnsafeMethods ?? false;
     initialResolved.retryUnsafeMethods = retryUnsafeMethods;
-    const timeoutMs = normalizeTimeout(initialResolved.timeout ?? defaults.timeout);
     const retryDelay = initialResolved.retryDelay ?? defaults.retryDelay ?? retry.delay ?? 0;
-    const totalTimeoutMs = normalizeTimeout(initialResolved.totalTimeout ?? defaults.totalTimeout);
-    const queuedAt = Date.now();
-    const totalController = totalTimeoutMs > 0 ? new AbortController() : null;
     const overallSignal = combineSignals([
       initialResolved.signal,
       initialResolved.rateLimit?.signal,
@@ -161,13 +176,6 @@ export async function runRequestPipeline<T>(
       // longer be able to stop the request.
       setupSignals.signal,
     ]);
-    let totalTimeoutTriggered = false;
-    const totalTimer = totalController
-      ? setTimeout(() => {
-        totalTimeoutTriggered = true;
-        totalController.abort(TIMEOUT_REASON);
-      }, totalTimeoutMs)
-      : undefined;
     const perform = async (): Promise<HttpResponse<unknown>> => {
       let lastError: HttpError | undefined;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -186,6 +194,7 @@ export async function runRequestPipeline<T>(
               ...interceptedConfig!,
               headers: AxiosHeaders.from(interceptedConfig!.headers),
             }, { signal: retrySignals.signal }), retrySignals.signal);
+            validateRequestOptions(retryInput);
             interceptedConfig = retryInput;
             const retryConfigSignals = combineSignals([
               retrySignals.signal,
@@ -232,8 +241,19 @@ export async function runRequestPipeline<T>(
             // Every attempt — including retries — passes back through the rate
             // limiter. Reserving the slot once for the whole retry loop would
             // let automatic retries exceed `requestsPerInterval`.
+            const cachePolicy = resolveCachePolicy({
+              config: attemptResolved, defaultCache: defaults.cache, fullResponse,
+              generatedRequestId: generatedRequestIdForCache,
+            });
+            const trackedAdapter: HttpAdapter = async config => {
+              if (config.method !== 'GET') invalidatesCache = true;
+              return adapter(config);
+            };
+            if (!cachePolicy.share) releaseAtEnd = true;
+            const attemptAdapter = cachePolicy.share
+              ? snapshotAdapter(trackedAdapter, cache, cachePolicy, releaseAdapterStream) : trackedAdapter;
             completedResponse = await rateLimiter.run((releaseSlot) => executeAttempt({
-              adapter,
+              adapter: attemptAdapter,
               config: attemptResolved,
               defaults,
               responseInterceptors,
@@ -304,30 +324,11 @@ export async function runRequestPipeline<T>(
       throw lastError || new HttpError('Request failed', { code: 'ERR_NETWORK', config: initialResolved });
     };
 
-    const cachePolicy = resolveCachePolicy({
-      config: initialResolved,
-      defaultCache: defaults.cache,
-      fullResponse,
-      generatedRequestId: generatedRequestIdForCache,
-      requestInterceptorCount: requestInterceptors.getHandlers().length,
-      responseInterceptorCount: responseInterceptors.getHandlers().length,
-      defaultRetry: defaults.retry,
-      defaultRetryOn: defaults.retryOn,
-      defaultRetryDelay: defaults.retryDelay,
-    });
-    // Scheduling now happens per attempt inside `perform`, so a retry cannot
-    // bypass `requestsPerInterval` by reusing the original reservation.
-    // A write request mutates server state as soon as the server responds, even
-    // if local response parsing/validation then fails. Cache invalidation must
-    // therefore be driven by the method, not by the whole request succeeding.
-    const invalidatesCache = initialResolved.method !== 'GET';
     let pipelineCleanupResponse: Response | undefined;
     try {
-      const result = cachePolicy.enabled
-        ? await cache.getOrLoad(cachePolicy.key!, cachePolicy.ttl, async () => (await perform()).data)
-        : await perform();
+      const result = await perform();
       if (invalidatesCache) cache.clear();
-      if (!cachePolicy.enabled && initialResolved.responseType === 'response') {
+      if (resolved?.responseType === 'response') {
         const response = result as HttpResponse<unknown>;
         // A full HttpResponse exposes `.raw`; the value-only API exposes the
         // body only when response transforms/interceptors kept that Response.
@@ -339,7 +340,7 @@ export async function runRequestPipeline<T>(
         }
       }
       if (fullResponse) return result as HttpResponse<T>;
-      return cachePolicy.enabled ? result as T : (result as HttpResponse<T>).data;
+      return (result as HttpResponse<T>).data;
     } catch (error) {
       // Mirror the success path: the server may already have applied the write.
       if (invalidatesCache) cache.clear();
@@ -363,12 +364,12 @@ export async function runRequestPipeline<T>(
       throw error;
     } finally {
       const cleanup = () => {
-        if (totalTimer) clearTimeout(totalTimer);
+        totalTimer?.();
         overallSignal.cleanup();
         // Adapters that keep an internal cancellation listener must drop it once
         // the pipeline is done; otherwise a long-lived caller signal accumulates
         // listeners for every completed request.
-        releaseAdapterStream?.();
+        if (releaseAtEnd) releaseAdapterStream?.();
       };
       if (!deferResponseBodyCleanup(pipelineCleanupResponse, cleanup)) cleanup();
     }
@@ -398,10 +399,11 @@ export async function runRequestPipeline<T>(
       || interceptedConfig?.rateLimit?.signal?.aborted
       || setupRateLimit?.signal?.aborted,
     );
-    const normalized = toError(error, fallbackConfig, false, setupCanceled);
+    const normalized = toError(error, fallbackConfig, totalTimeoutTriggered, setupCanceled);
     notifyError(normalized);
     throw normalized;
   } finally {
+    if (!setupCleanupResponse) totalTimer?.();
     if (!deferResponseBodyCleanup(setupCleanupResponse, setupSignals.cleanup)) {
       setupSignals.cleanup();
     }
