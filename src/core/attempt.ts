@@ -45,6 +45,7 @@ export interface ExecuteAttemptOptions {
    * client.
    */
   onAdapterSettled?: () => void;
+  observeBody?: boolean;
 }
 
 function responseMessage(payload: unknown, status: number): string {
@@ -92,7 +93,7 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
     config.rateLimit?.signal,
   ]);
   const externalSignal = attemptSignals.signal;
-  const controller = externalSignal || timeoutMs > 0 || totalTimeoutEnabled ? new AbortController() : null;
+  const controller = options.observeBody || externalSignal || timeoutMs > 0 || totalTimeoutEnabled ? new AbortController() : null;
   let timeoutTriggered = false;
   let cancelTimer: (() => void) | undefined;
   const onAbort = () => controller?.abort(externalSignal?.reason);
@@ -207,7 +208,27 @@ export async function executeAttempt(options: ExecuteAttemptOptions): Promise<Ht
         if (attemptConfig.signal?.aborted) throw cause;
         throw new HttpError('Response schema validation failed', {
           code: 'ERR_SCHEMA_VALIDATION',
+          status: rawResponse.status,
           config: attemptConfig,
+          response: {
+            // Diagnostics retain HTTP context without retaining an untrusted
+            // response payload that may contain private data.
+            data: null,
+            status: rawResponse.status,
+            statusText: rawResponse.statusText,
+            headers: new AxiosHeaders(rawResponse.headers),
+            config: attemptConfig,
+            raw: rawResponse,
+            protocol: metadata?.protocol ?? 'unknown',
+            timings: {
+              queuedAt,
+              startedAt,
+              headersAt,
+              completedAt: Date.now(),
+              duration: Date.now() - queuedAt,
+              ...metadata?.timings,
+            },
+          },
           cause,
         });
       }

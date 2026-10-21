@@ -18,6 +18,8 @@ export interface CacheWaitOptions {
   deadline?: number;
   /** Whether the resolved value may be retained. */
   shouldStore?: (value: unknown) => boolean;
+  /** Observe reuse without changing cache policy or request data. */
+  onReuse?: (source: 'cache' | 'inflight') => void;
 }
 
 function cloneValue<T>(value: T): T {
@@ -168,11 +170,15 @@ export class GetRequestCache {
     const generation = this.generation;
     const cached = this.responseCache.get(key);
     if (ttlMs > 0 && cached && cached.expiresAt > now) {
+      try { options?.onReuse?.('cache'); } catch { /* observers do not change cache outcomes */ }
       return cloneValue(await waitFor(Promise.resolve(cached.value as T), options));
     }
     if (cached && cached.expiresAt <= now) this.responseCache.delete(key);
 
     let inflight = this.inflightRequests.get(key);
+    if (inflight) {
+      try { options?.onReuse?.('inflight'); } catch { /* observers do not change cache outcomes */ }
+    }
     if (!inflight) {
       const controller = new AbortController();
       const entry = { controller, users: 0, settled: false, promise: undefined as unknown as Promise<unknown> };

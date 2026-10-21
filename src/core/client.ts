@@ -4,8 +4,12 @@ import { createInterceptorManager, createRequestInterceptorManager } from './int
 import { buildFetchAdapter, createRequestId } from './config.js';
 import { runRequestPipeline, type RequestPipelineDeps } from './pipeline.js';
 import { validateRequestOptions } from './configuration/validation.js';
+import { createPluginRuntime } from '../plugins/runtime.js';
+import { registerClientLifecyclePolicy } from './lifecycle/client-policy.js';
 import type { HttpAdapter, HttpClient, HttpClientConfig, HttpResponse, RequestConfig } from './types.js';
 
+export function createHttpClient<TContext = unknown>(): HttpClient<TContext, {}>;
+export function createHttpClient<TContext = unknown, const TDefaults extends HttpClientConfig<TContext> = HttpClientConfig<TContext>>(options: TDefaults): HttpClient<TContext, TDefaults>;
 export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   validateRequestOptions(options);
   const defaults: HttpClientConfig = {
@@ -18,6 +22,8 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const responseInterceptors = createInterceptorManager<HttpResponse<unknown>>();
   const cache = new GetRequestCache(createRequestId());
   const rateLimiter = new RateLimiter(defaults.rateLimit ?? {});
+  const plugins = createPluginRuntime(() => client);
+  let closing: Promise<void> | undefined;
   // Adapters that manage long-lived transports (HTTP/2 sessions) can expose a
   // per-request release hook so a completed request drops its abort listener.
   const releaseAdapterStream = () => adapter.releaseStream?.();
@@ -29,6 +35,7 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
     cache,
     rateLimiter,
     releaseAdapterStream,
+    events: plugins,
   };
 
   const requestInternal = async <T>(input: RequestConfig, fullResponse: boolean): Promise<T | HttpResponse<T>> => {
@@ -43,33 +50,44 @@ export function createHttpClient(options: HttpClientConfig = {}): HttpClient {
   const requestResponse = <T>(input: RequestConfig | string, config?: RequestConfig): Promise<HttpResponse<T>> =>
     requestInternal<T>(normalizePublicConfig(input, config), true) as Promise<HttpResponse<T>>;
 
-  const client: HttpClient = {
+  const client = {
     request,
     requestResponse,
-    get: (url, config = {}) => request({ ...config, url, method: 'GET' }),
-    getResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'GET' }),
-    head: (url, config = {}) => request({ ...config, url, method: 'HEAD' }),
-    headResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'HEAD' }),
-    options: (url, config = {}) => request({ ...config, url, method: 'OPTIONS' }),
-    optionsResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'OPTIONS' }),
-    trace: (url, config = {}) => request({ ...config, url, method: 'TRACE' }),
-    traceResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'TRACE' }),
-    connect: (url, config = {}) => request({ ...config, url, method: 'CONNECT' }),
-    connectResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'CONNECT' }),
-    post: (url, data, config = {}) => request({ ...config, url, method: 'POST', data }),
-    postResponse: (url, data, config = {}) => requestResponse({ ...config, url, method: 'POST', data }),
-    put: (url, data, config = {}) => request({ ...config, url, method: 'PUT', data }),
-    putResponse: (url, data, config = {}) => requestResponse({ ...config, url, method: 'PUT', data }),
-    patch: (url, data, config = {}) => request({ ...config, url, method: 'PATCH', data }),
-    patchResponse: (url, data, config = {}) => requestResponse({ ...config, url, method: 'PATCH', data }),
-    delete: (url, config = {}) => request({ ...config, url, method: 'DELETE' }),
-    deleteResponse: (url, config = {}) => requestResponse({ ...config, url, method: 'DELETE' }),
+    get: (url: string, config: RequestConfig = {}) => request({ ...config, url, method: 'GET' }),
+    getResponse: (url: string, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'GET' }),
+    head: (url: string, config: RequestConfig = {}) => request({ ...config, url, method: 'HEAD' }),
+    headResponse: (url: string, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'HEAD' }),
+    options: (url: string, config: RequestConfig = {}) => request({ ...config, url, method: 'OPTIONS' }),
+    optionsResponse: (url: string, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'OPTIONS' }),
+    trace: (url: string, config: RequestConfig = {}) => request({ ...config, url, method: 'TRACE' }),
+    traceResponse: (url: string, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'TRACE' }),
+    connect: (url: string, config: RequestConfig = {}) => request({ ...config, url, method: 'CONNECT' }),
+    connectResponse: (url: string, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'CONNECT' }),
+    post: (url: string, data?: unknown, config: RequestConfig = {}) => request({ ...config, url, method: 'POST', data }),
+    postResponse: (url: string, data?: unknown, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'POST', data }),
+    put: (url: string, data?: unknown, config: RequestConfig = {}) => request({ ...config, url, method: 'PUT', data }),
+    putResponse: (url: string, data?: unknown, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'PUT', data }),
+    patch: (url: string, data?: unknown, config: RequestConfig = {}) => request({ ...config, url, method: 'PATCH', data }),
+    patchResponse: (url: string, data?: unknown, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'PATCH', data }),
+    delete: (url: string, config: RequestConfig = {}) => request({ ...config, url, method: 'DELETE' }),
+    deleteResponse: (url: string, config: RequestConfig = {}) => requestResponse({ ...config, url, method: 'DELETE' }),
     clearCache: () => cache.clear(),
-    close: () => adapter.closeTransport?.(),
+    use: plugins.use,
+    close: () => closing ??= (async () => {
+      try { await plugins.close(); }
+      finally { await adapter.closeTransport?.(); }
+    })(),
     interceptors: {
       request: requestInterceptors,
       response: responseInterceptors,
     },
-  };
+  } as unknown as HttpClient;
+  registerClientLifecyclePolicy(client, defaults);
+  try {
+    for (const plugin of defaults.plugins ?? []) plugins.use(plugin);
+  } catch (error) {
+    void client.close()?.catch(() => undefined);
+    throw error;
+  }
   return client;
 }

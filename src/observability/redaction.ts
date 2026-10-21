@@ -1,15 +1,10 @@
 import { isHttpError } from '../core/errors.js';
 import { AxiosHeaders, type HeaderInput } from '../headers/headers.js';
-
-const DEFAULT_QUERY_NAMES = [
-  'token', 'access_token', 'refresh_token', 'id_token', 'api_key', 'apikey',
-  'key', 'secret', 'client_secret', 'password', 'passwd', 'authorization',
-  'signature', 'sig', 'session', 'sessionid', 'csrf', 'csrf_token',
-];
+import { SENSITIVE_QUERY_NAMES } from '../utils/sensitive-query.js';
 
 /** Redact query values without normalizing ordinary parameters or relative URLs. */
 export function createQueryRedactor(additionalNames: readonly string[] = []): (text: string) => string {
-  const names = new Set([...DEFAULT_QUERY_NAMES, ...additionalNames].map((name) => name.toLowerCase()));
+  const names = new Set([...SENSITIVE_QUERY_NAMES, ...additionalNames].map((name) => name.toLowerCase()));
   return (text) => {
     let output = '';
     let cursor = 0;

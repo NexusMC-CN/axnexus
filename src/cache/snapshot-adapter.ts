@@ -17,7 +17,7 @@ interface ResponseSnapshot {
 }
 
 /** Share only network bytes. Parsing, retries and user hooks belong to each caller. */
-export function snapshotAdapter(adapter: HttpAdapter, cache: GetRequestCache, policy: CachePolicy, release?: () => void): HttpAdapter {
+export function snapshotAdapter(adapter: HttpAdapter, cache: GetRequestCache, policy: CachePolicy, release?: () => void, onReuse?: (source: 'cache' | 'inflight') => void): HttpAdapter {
   return async (config) => {
     const snapshot = await cache.getOrLoad<ResponseSnapshot>(policy.key!, policy.ttl, async (signal) => {
       // The shared request must never inherit the first subscriber's abort controller.
@@ -48,6 +48,7 @@ export function snapshotAdapter(adapter: HttpAdapter, cache: GetRequestCache, po
       }
     }, {
       signal: config.signal,
+      onReuse,
       shouldStore: value => {
         const entry = value as ResponseSnapshot;
         const headers = new Headers(entry.headers);

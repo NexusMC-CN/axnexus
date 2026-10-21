@@ -111,9 +111,25 @@ function abortReason(signal: AbortSignal): unknown {
 interface RawResponseLifecycle {
   finished: boolean;
   cleanups: Set<() => void>;
+  outcome?: ResponseBodyOutcome;
+  observers?: Set<(outcome: ResponseBodyOutcome) => void>;
+}
+
+export interface ResponseBodyOutcome {
+  kind: 'complete' | 'error' | 'canceled';
+  error?: unknown;
 }
 
 const RAW_RESPONSE_LIFECYCLES = new WeakMap<Response, RawResponseLifecycle>();
+
+/** Observe final body ownership without consuming or eagerly reading the stream. */
+export function observeResponseBody(response: Response, observer: (outcome: ResponseBodyOutcome) => void): boolean {
+  const lifecycle = RAW_RESPONSE_LIFECYCLES.get(response);
+  if (!lifecycle) return false;
+  if (lifecycle.finished) observer(lifecycle.outcome ?? { kind: 'complete' });
+  else (lifecycle.observers ??= new Set()).add(observer);
+  return true;
+}
 
 /**
  * Keep request cancellation and transport resources alive while a caller owns
@@ -315,14 +331,19 @@ function limitRawResponse(response: Response, maxBodySize?: number, signal?: Abo
   const releaseSourceLock = () => {
     try { source.releaseLock(); } catch { /* a read/cancel may still be settling */ }
   };
-  const finish = () => {
+  const finish = (outcome: ResponseBodyOutcome = { kind: 'complete' }) => {
     if (lifecycle.finished) return;
     lifecycle.finished = true;
+    lifecycle.outcome = outcome;
     signal?.removeEventListener('abort', onAbort);
     for (const cleanup of lifecycle.cleanups) {
       try { cleanup(); } catch { /* cleanup must not replace the stream result */ }
     }
     lifecycle.cleanups.clear();
+    for (const observer of lifecycle.observers ?? []) {
+      try { observer(outcome); } catch { /* observation cannot replace stream outcomes */ }
+    }
+    lifecycle.observers?.clear();
   };
   const onAbort = () => {
     if (lifecycle.finished) return;
@@ -333,7 +354,7 @@ function limitRawResponse(response: Response, maxBodySize?: number, signal?: Abo
       releaseSourceLock();
     }
     try { streamController?.error(reason); } catch { /* stream already closed */ }
-    finish();
+    finish({ kind: 'error', error: reason });
   };
   const limited = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -358,7 +379,7 @@ function limitRawResponse(response: Response, maxBodySize?: number, signal?: Abo
           });
           void source.cancel(error).catch(() => undefined).finally(releaseSourceLock);
           controller.error(error);
-          finish();
+          finish({ kind: 'error', error });
           return;
         }
         controller.enqueue(value);
@@ -366,7 +387,7 @@ function limitRawResponse(response: Response, maxBodySize?: number, signal?: Abo
         if (!lifecycle.finished) {
           controller.error(error);
           releaseSourceLock();
-          finish();
+          finish({ kind: 'error', error });
         }
       }
     },
@@ -376,10 +397,10 @@ function limitRawResponse(response: Response, maxBodySize?: number, signal?: Abo
         canceled = source.cancel(reason);
       } catch (error) {
         releaseSourceLock();
-        finish();
+        finish({ kind: 'error', error });
         throw error;
       }
-      finish();
+      finish({ kind: 'canceled', error: reason });
       return canceled.finally(releaseSourceLock);
     },
   });

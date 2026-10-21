@@ -18,7 +18,30 @@ export type HttpErrorCode =
   | 'ERR_SCHEMA_VALIDATION'
   | 'ERR_PROTOCOL_NEGOTIATION';
 
+let httpErrorPrototypes: WeakSet<object>;
+
 export class HttpError<T = unknown> extends Error {
+  static {
+    // Registration stays attached to the retained class. The version confines
+    // recognition to copies of the same error contract in this environment.
+    const key = Symbol.for('@nexusmc-cn/axnexus@0.2.0/HttpError/prototypes');
+    const registry = globalThis as typeof globalThis & { [key: symbol]: unknown };
+    httpErrorPrototypes = (registry[key] ??= new WeakSet<object>()) as WeakSet<object>;
+    httpErrorPrototypes.add(HttpError.prototype);
+  }
+
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    // Subclasses keep native semantics: base errors do not become instances
+    // of arbitrary subclasses that inherit this method.
+    if (this !== HttpError) return super[Symbol.hasInstance](value);
+    if (super[Symbol.hasInstance](value)) return true;
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+    for (let prototype = Object.getPrototypeOf(value); prototype; prototype = Object.getPrototypeOf(prototype)) {
+      if (httpErrorPrototypes.has(prototype)) return true;
+    }
+    return false;
+  }
+
   readonly code: HttpErrorCode;
   readonly status?: number;
   readonly config?: ResolvedRequestConfig;

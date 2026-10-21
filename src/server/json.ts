@@ -4,7 +4,7 @@ import { assertBrowserMethod } from '../adapters/method.js';
 import { AxiosHeaders } from '../headers/headers.js';
 import type { JsonParser, StandardSchema } from '../core/types.js';
 import { HttpError } from '../core/errors.js';
-import { validateStandardSchema } from '../core/schema.js';
+import { validateStandardSchema, type InferSchemaOutput } from '../core/schema.js';
 import { raceWithSignal } from '../core/control.js';
 import type { HeaderInput } from '../headers/headers.js';
 import { mergeMethodHeaders } from '../headers/methods.js';
@@ -41,7 +41,14 @@ function buildHeaders(headers: HeaderInput | undefined, cookie: string | undefin
   return store.toHeaders();
 }
 
-export async function fetchJsonResult<T = unknown>(url: string | URL, options: FetchJsonOptions = {}): Promise<FetchJsonResult<T>> {
+export function fetchJsonResult<const TOptions extends FetchJsonOptions & { schema: StandardSchema }>(url: string | URL, options: TOptions): Promise<FetchJsonResult<InferSchemaOutput<TOptions['schema']>>>;
+export function fetchJsonResult<const TOptions extends FetchJsonOptions>(url: string | URL, options: TOptions): Promise<FetchJsonResult>;
+export function fetchJsonResult<T = unknown>(url: string | URL, options?: FetchJsonOptions & { schema?: undefined }): Promise<FetchJsonResult<T>>;
+export function fetchJsonResult(url: string | URL, options: FetchJsonOptions = {}): Promise<FetchJsonResult> {
+  return fetchJsonResultInternal(url, options);
+}
+
+async function fetchJsonResultInternal(url: string | URL, options: FetchJsonOptions): Promise<FetchJsonResult> {
   const {
     cookie,
     timeout,
@@ -105,10 +112,10 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
       cancelBody(response);
       return { data: null, status: response.status, response };
     }
-    const payload = await readResponse(response, 'json', maxBodySize, parseJson, combined.signal) as T | null | undefined;
+    const payload = await readResponse(response, 'json', maxBodySize, parseJson, combined.signal);
     // `undefined` is an absent payload; an explicit JSON `null` is a value and
     // must still be validated.
-    let data = (payload === undefined ? null : payload) as T | null;
+    let data: unknown = payload === undefined ? null : payload;
     if (schema && payload !== undefined) {
       try {
         // A Standard Schema validator may be asynchronous and never settle.
@@ -116,9 +123,9 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
         // caller cancellation effective during validation, matching the client
         // pipeline.
         data = await raceWithSignal(
-          Promise.resolve(validateStandardSchema(payload, schema) as T | Promise<T>),
+          validateStandardSchema(payload, schema),
           combined.signal,
-        ) as T;
+        );
       } catch (cause) {
         // A timeout/cancellation is not a validation failure: rethrow it so the
         // caller still sees the native `AbortError` (name 'AbortError'), which
@@ -127,6 +134,17 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
         if (combined.signal?.aborted) throw cause;
         throw new HttpError('Response schema validation failed', {
           code: 'ERR_SCHEMA_VALIDATION',
+          status: response.status,
+          response: {
+            data: null,
+            status: response.status,
+            statusText: response.statusText,
+            headers: new AxiosHeaders(response.headers),
+            config: { url: String(url), method, headers: buildHeaders(headers, cookie, method) },
+            raw: response,
+            protocol: 'unknown',
+            timings: { queuedAt: startedAt, startedAt, completedAt: Date.now(), duration: Date.now() - startedAt },
+          },
           cause,
         });
       }
@@ -139,7 +157,10 @@ export async function fetchJsonResult<T = unknown>(url: string | URL, options: F
   }
 }
 
-export async function fetchJson<T = unknown>(url: string | URL, options: FetchJsonOptions = {}): Promise<T | null> {
-  const result = await fetchJsonResult<T>(url, options);
+export function fetchJson<const TOptions extends FetchJsonOptions & { schema: StandardSchema }>(url: string | URL, options: TOptions): Promise<InferSchemaOutput<TOptions['schema']> | null>;
+export function fetchJson<const TOptions extends FetchJsonOptions>(url: string | URL, options: TOptions): Promise<unknown>;
+export function fetchJson<T = unknown>(url: string | URL, options?: FetchJsonOptions & { schema?: undefined }): Promise<T | null>;
+export async function fetchJson(url: string | URL, options: FetchJsonOptions = {}): Promise<unknown> {
+  const result = await fetchJsonResultInternal(url, options);
   return result.data;
 }

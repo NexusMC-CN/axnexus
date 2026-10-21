@@ -4,7 +4,7 @@
 
 ## 特性
 
-- 零运行时依赖，面向现代浏览器、Node.js 18+ 和提供标准 Web API 的 Bun 运行环境。
+- 核心零运行时依赖，面向现代浏览器、Node.js 18+ 和提供标准 Web API 的 Bun 运行环境。
 - 提供 `get`、`head`、`options`、`trace`、`connect`、`post`、`put`、`patch`、`delete` 和通用 `request` 方法。
 - 自动处理 JSON、文本、`Blob`、`ArrayBuffer`、`FormData` 和 `Response`。
 - 支持请求/响应拦截器、请求 ID、超时、`AbortSignal` 和可配置重试。
@@ -18,14 +18,32 @@
 - 提供请求生命周期日志适配器，默认脱敏 Cookie 和 Authorization 等敏感请求头。
 - 可选 Node HTTP/2 adapter，以及只通过注入 transport 启用的 HTTP/3 adapter。
 - CSRF 通过显式拦截器接入，不修改全局 `fetch`，不读取页面 Cookie。
+- Standard Schema 输入/输出类型推导、结构化校验错误，以及 SSE/NDJSON、Fetch 桥接和轻量端点契约。
+- 类型化本地 context、客户端插件、自动日志，以及可选 OpenTelemetry 和 TanStack Query 集成。
 
 ## 安装
 
 ```bash
-npm install @nexusmc-cn/axnexus
+pnpm add @nexusmc-cn/axnexus
 ```
 
 包以 ESM 发布，使用 `import` 引入，并内置 TypeScript 类型声明。API 采用实例、拦截器和 `AxiosHeaders` 风格，便捷请求方法默认直接返回解析后的数据。
+
+### 入口导航
+
+| 入口 | 用途 |
+| --- | --- |
+| `@nexusmc-cn/axnexus` | HTTP 客户端、headers、schema、缓存、上传和日志 |
+| `@nexusmc-cn/axnexus/stream` | [SSE/NDJSON 消费与 SSE 重连](#sse-和-ndjson) |
+| `@nexusmc-cn/axnexus/fetch` | [为 oRPC 等 SDK 提供 Fetch](#fetch-桥接与-orpc) |
+| `@nexusmc-cn/axnexus/contracts` | [端点契约与业务错误](#端点契约) |
+| `@nexusmc-cn/axnexus/plugins` | [插件和生命周期事件类型](#context-和插件) |
+| `@nexusmc-cn/axnexus/observability` | [请求日志及自动接入](#请求观测) |
+| `@nexusmc-cn/axnexus/opentelemetry` | [可选 OpenTelemetry 插件](#opentelemetry) |
+| `@nexusmc-cn/axnexus/tanstack-query` | [可选 TanStack Query options](#tanstack-query) |
+| `@nexusmc-cn/axnexus/node-http2`、`@nexusmc-cn/axnexus/node-http3` | [Node 传输](#http2-和-http3) |
+
+根入口不加载 Node 传输或可选集成依赖。只在使用 OpenTelemetry、TanStack Query 或 oRPC 时安装相应依赖，见各节说明。
 
 ## 快速开始
 
@@ -105,6 +123,42 @@ const result = await http.get('/jobs/123', {
 
 客户端和 `fetchJson` 都接受可选的 Standard Schema 校验器：解析后执行 `schema['~standard'].validate()`，校验失败抛出 `ERR_SCHEMA_VALIDATION`。客户端在校验通过后才运行 `transformResponse`；无需绑定 Zod、Valibot 等具体库。空响应跳过校验，JSON `null` 则仍然校验；校验器返回带 `issues` 的结果（包括空数组）都视为失败。
 
+### Schema 与类型推导
+
+配置 `schema` 后移除手填的响应 `<T>`，由 schema 的输出推导类型；`get`、`request`、完整响应方法、`fetchJson` 和 `fetchJsonResult` 遵守同一规则。无响应体仍可能得到 `null`，因此推导包含 `null`。未配置 schema 的调用保留原有显式泛型 API。
+
+可以直接使用兼容 Standard Schema v1 的库，也可以手写校验器。`StandardSchema<Output, Input>` 保留输出泛型在前的顺序，`version`、`vendor` 和 `types` 对旧式手写校验器可省略；成功结果必须包含 `value`，失败结果包含 `issues`。
+
+```typescript
+import { createHttpClient, fetchJson, type StandardSchema } from '@nexusmc-cn/axnexus';
+
+type User = { id: number; name: string };
+const userSchema: StandardSchema<User, User> = {
+  '~standard': {
+    version: 1,
+    vendor: 'example',
+    validate(value) {
+      if (typeof value === 'object' && value !== null
+        && 'id' in value && typeof value.id === 'number'
+        && 'name' in value && typeof value.name === 'string') {
+        return { value: { id: value.id, name: value.name } };
+      }
+      return { issues: [{ message: '需要用户对象' }] };
+    },
+  },
+};
+
+const validatedHttp = createHttpClient({ baseURL: 'https://api.example.com', schema: userSchema });
+const user = await validatedHttp.get('/users/me'); // User | null
+const response = await validatedHttp.getResponse('/users/me'); // response.data: User | null
+const oneOff = await fetchJson('https://api.example.com/users/me', { schema: userSchema }); // User | null
+const transformed = await validatedHttp.get('/users/me', {
+  transformResponse: (data) => ({ user: data }),
+}); // unknown
+```
+
+schema 先校验，再执行响应转换。客户端默认或单次请求配置了 `transformResponse` 时，最终结果保守推导为 `unknown`；需要使用转换结果时再缩窄类型。`InferSchemaInput` 和 `InferSchemaOutput` 可用于提取 schema 两端的类型。下文沿用此处的 `userSchema`。
+
 JSON（包括自定义 `parseJson`）解析失败抛出 `ERR_BAD_PAYLOAD`，`transformResponse` 失败抛出 `ERR_TRANSFORM_RESPONSE`。错误状态的 payload 会按文本读取后尝试 JSON 解析，超过 `maxBodySize` 时置为 `null`，原始 HTTP 状态错误仍保留。被丢弃或未读完的响应体会主动取消，以释放连接。
 
 `validateStatus` 或 `throwHttpErrors` 回调自身抛错时返回 `ERR_INVALID_STATUS_POLICY`，并且不会当作可重试的网络错误重发请求。
@@ -172,6 +226,8 @@ console.log(response.data, response.status, response.protocol, response.timings.
 
 ### API 签名速查
 
+下表展示未配置 schema 的显式泛型调用；配置 schema 后使用[自动类型推导](#schema-与类型推导)。
+
 | API | 签名 |
 | --- | --- |
 | 创建实例 | `createHttpClient(config?: HttpClientConfig): HttpClient` |
@@ -218,6 +274,22 @@ try {
 | `ERR_UNSUPPORTED_ADAPTER` | 当前环境不支持所选 adapter |
 | `ERR_UNSUPPORTED_METHOD` | 所选 adapter 不支持该 HTTP 方法 |
 | `ERR_PROTOCOL_NEGOTIATION` | transport 无法协商请求的协议 |
+
+响应 schema 校验失败的 `HttpError` 保留可用的 `status` 和 `response`，其 `cause` 为 `SchemaValidationError`，通过只读 `issues` 读取每项的 `message` 和可选 `path`：
+
+```typescript
+import { isHttpError, isSchemaValidationError } from '@nexusmc-cn/axnexus';
+
+try {
+  await http.get('/users/me', { schema: userSchema });
+} catch (error) {
+  if (isHttpError(error) && isSchemaValidationError(error.cause)) {
+    console.error(error.status, error.cause.issues);
+  }
+}
+```
+
+`isHttpError` / `instanceof HttpError` 和 `isSchemaValidationError` / `instanceof SchemaValidationError` 能识别同一全局运行环境中同版本的重复模块实例，保留错误分类、响应、取消和超时信息；不保证跨版本、跨进程或跨 realm 的识别。普通同名或同形对象不会被当作 axnexus 错误。
 
 ## 取消和超时
 
@@ -387,6 +459,92 @@ if (result.status >= 400) {
 
 成功状态的非空响应交给 `parseJson`（默认 `JSON.parse`）；解析失败抛出 `ERR_BAD_PAYLOAD`。超时或外部 signal 取消按原生 `AbortError` 传播，与客户端的 `ETIMEDOUT` / `ERR_CANCELED` 错误码不同。`fetchJsonResult` 的 `response` 已被 helper 消费或取消；需要原始响应体时使用客户端的 `responseType: 'response'`。
 
+## SSE 和 NDJSON
+
+`./stream` 基于未消费的原始 `Response` 增量解码，返回 `AsyncIterable`。`parseSSE` 默认保留字符串 data 和 `event`、`id`、`retry`；`parseNDJSON` 默认逐行解析 JSON，类型为 `unknown`。提供 `schema` 后逐条校验并推导输出；SSE 的 JSON data 还需显式配置 `parseJson: JSON.parse`。
+
+```typescript
+import { parseSSE, parseNDJSON, connectSSE } from '@nexusmc-cn/axnexus/stream';
+
+const events = await http.get<Response>('/events', { responseType: 'response' });
+for await (const event of parseSSE(events, { idleTimeout: 30_000 })) {
+  console.log(event.id, event.data); // data: string
+}
+
+const records = await http.get<Response>('/users.ndjson', { responseType: 'response' });
+for await (const user of parseNDJSON(records, { schema: userSchema })) {
+  console.log(user.name);
+}
+
+for await (const event of connectSSE(http, '/user-events', {
+  parseJson: JSON.parse,
+  schema: userSchema,
+  idleTimeout: 30_000,
+  reconnect: { maxAttempts: 3, maxDelay: 5_000, retryOnEOF: true },
+})) {
+  console.log(event.data.name);
+}
+```
+
+`maxMessageSize` 默认是 `1 MiB`，按 UTF-8 字节限制每条 NDJSON 记录或整个 SSE 帧，包含 SSE 字段及注释，不含换行符；它与整份响应的 `maxBodySize` 独立。`idleTimeout` 限制等待下一个响应块的时间，`0` 或省略表示关闭，不计消费者处理消息的时间。解析、校验失败、`break`、迭代器 `.return()` 或外部 `signal` 取消都会释放 reader；`.return()` 也会中断正在等待的读取或校验。
+
+`connectSSE` 默认只连接一次。重连必须显式开启且仅支持 GET，`maxAttempts` 包含首次连接，延迟受 `maxDelay` 限制；默认不因正常 EOF 重连。重连携带最后有效的 `Last-Event-ID`，空 id 会重置它；HTTP 204 或 `isComplete(event)` 返回 `true` 时结束，完成事件不再输出。服务端仍需处理重放和去重，这不保证恰好一次投递。普通请求重试在连接时关闭；使用该入口的客户端响应拦截器应保留未消费的原始响应。XHR 不适合实时 SSE。
+
+## Fetch 桥接与 oRPC
+
+`./fetch` 的 `createFetchHandler` 创建可注入 SDK 的 Fetch 函数，使用专用客户端，只接受 transport、headers、超时、大小限制、限速和进度配置。它关闭 axnexus 重试和缓存，把 HTTP 状态及原始响应体交给 SDK；不接受 schema、响应转换、客户端插件或拦截器配置。
+
+使用 oRPC 时由应用安装 `@orpc/client`：
+
+```bash
+pnpm add @orpc/client
+```
+
+```typescript
+import { RPCLink } from '@orpc/client/fetch';
+import { createFetchHandler } from '@nexusmc-cn/axnexus/fetch';
+
+const transport = createFetchHandler({ timeout: 10_000 });
+const link = new RPCLink({ url: 'https://api.example.com/rpc', fetch: transport });
+try {
+  const result = await link.call(['health'], undefined, { context: {} });
+  console.log(result);
+} finally {
+  await transport.close();
+}
+```
+
+桥接保留 Request/init 的方法、headers、signal、原始 body 和 `redirect: 'manual'`，不会重复 JSON 编码或预读响应。传输失败仍使用 axnexus 的 `HttpError` 分类。应用结束使用该 transport 后调用 `close()` 释放持久连接等资源。
+
+## 端点契约
+
+`./contracts` 的 `defineEndpoint` 描述 method、相对 path、query/body/output schema 和业务 `errors` map。`{name}` 路径参数按独立片段编码；query/body 接受 schema 的输入类型，网络发送使用校验后的输出。路径或输入校验失败时不产生网络 I/O。
+
+```typescript
+import { defineEndpoint } from '@nexusmc-cn/axnexus/contracts';
+
+const updateUser = defineEndpoint({
+  method: 'PUT',
+  path: '/users/{id}',
+  body: userSchema,
+  output: userSchema,
+  errors: { CONFLICT: { status: 409, schema: userSchema } },
+});
+const users = updateUser.bind(http);
+const input = { params: { id: 1 }, body: { id: 1, name: 'Anna' } };
+const saved = await users.call(input, { totalTimeout: 10_000 }); // User
+const result = await users.safeCall(input);
+if (result.kind === 'success') {
+  console.log(result.data.name);
+} else if (result.kind === 'domain' && result.error.code === 'CONFLICT') {
+  console.log('已存在的用户：', result.error.data.name);
+}
+```
+
+也可直接调用 `updateUser.call(http, input)` / `safeCall(http, input)`。`call` 失败时抛错；`safeCall` 用 `kind` 区分 `success`、`domain`、`http`、`transport` 和 `unexpected`。仅当状态码与已声明错误 schema 同时匹配时生成带业务 code/data 的 `DomainError`；未声明或错误体不匹配时保留 HTTP 错误。业务 code 与 `HttpErrorCode` 相互独立。
+
+契约自己校验输出，并覆盖客户端默认 schema 和响应转换。调用级或客户端默认 `timeout` / `totalTimeout` 形成覆盖输入校验、网络、输出及业务错误校验的整次调用预算，外部 signal 也覆盖这些阶段。schema 回调应自行停止其内部异步工作；取消会结束调用方等待。绑定前后均保留客户端的 context 类型。
+
 ## 分块上传
 
 `uploadChunks` 接受 `Uint8Array`，负责编排分块、并发和聚合进度，实际上传由调用方提供，可接入 multipart、对象存储或自定义分片协议：
@@ -417,6 +575,52 @@ const parts = await uploadChunks(bytes, {
 
 ## 请求观测
 
+### Context 和插件
+
+`createHttpClient<TContext>()` 为配置、拦截器、插件和可选集成保留本地 context 类型。context 不会自动发到服务端、写入日志或进入缓存键；影响响应的租户、语言或身份仍需显式映射到请求和缓存分区。
+
+```typescript
+import { createHttpClient, type HttpPlugin } from '@nexusmc-cn/axnexus';
+
+type Context = { tenant: string };
+const observer: HttpPlugin<Context> = {
+  create() {
+    let completed = 0;
+    return {
+      setup: () => () => { completed = 0; },
+      onEvent(event) {
+        if (event.phase === 'request:end') completed += 1;
+      },
+    };
+  },
+};
+const scopedHttp = createHttpClient<Context>({ plugins: [observer] });
+await scopedHttp.get('/items', { context: { tenant: 'public' } });
+const detach = scopedHttp.use(observer);
+await detach();
+await scopedHttp.close();
+```
+
+`plugins` 按配置顺序注册，`use()` 返回可重复调用的异步卸载函数。`setup(client)` 同步执行一次，可注册拦截器并返回清理函数；`close()` 卸载插件并释放 adapter 资源。复用有状态插件定义时用 `create()` 创建每客户端独立状态。
+
+`onEvent` 用于记录事件，返回值不会替换请求结果；同步异常和异步拒绝与请求结果隔离，请求不会等待观测任务完成。事件中的 config/context 保留引用，修改请求应使用 `setup` 注册拦截器。事件区分逻辑请求、attempt、transport、缓存命中/去重，以及 `queue`、`retry`、`body` 的开始和结束。结束事件的 `duration` 单位为毫秒；retry 包含 `beforeRetry` 和等待时间，其 `attempt` 是即将执行的重试序号，从 1 开始。原始流的最终请求事件在 EOF、读取失败或取消时产生。
+
+### 自动日志
+
+已有 logger 可自动绑定到客户端生命周期：
+
+```typescript
+import { createRequestLogger, attachRequestLogger, createRequestLoggerPlugin } from '@nexusmc-cn/axnexus';
+
+const autoLogger = createRequestLogger((record) => console.info(record));
+const detachLogger = attachRequestLogger(http, autoLogger);
+// 或在创建时配置 plugins: [createRequestLoggerPlugin(autoLogger)]
+await http.get('/health');
+await detachLogger();
+```
+
+自动日志为每个逻辑请求记录一次开始与结束，沿用下述脱敏规则；结束记录汇总排队、重试等待和原始流消费耗时，以及尝试次数和缓存复用方式。原始流在消费结束后才结束日志。单独使用 logger 仍可手动记录：
+
 `createRequestLogger` 将请求开始、完成和错误统一成可注入的记录格式，并默认脱敏 `authorization`、`cookie` 和 `set-cookie`。`record`、`start`、`complete` 和 `error` 都遵守同一套输入与脱敏规则；`start` 返回一次性生命周期句柄，句柄会用 `options.now`（默认 `Date.now`）计算耗时：
 
 ```typescript
@@ -441,10 +645,68 @@ try {
 | `headers` | 接受 `HeaderInput`，输出时规范化并脱敏敏感头 |
 | `status` | 可选的 HTTP 状态码 |
 | `duration` | 毫秒数；生命周期句柄可自动计算 |
+| `timings` | 自动日志累计的 `queue`、`retry` 毫秒数；原始响应体结束时包含 `body`，从响应交还给消费者起计时 |
+| `attempts` / `cache` | 自动日志的 attempt 数量，以及发生缓存复用时的 `hit` 或 `dedupe`；attempt 不等同于实际网络请求次数 |
 | `responseBytes` | 可选的响应字节数 |
 | `error` | 错误摘要，裁剪任意附加字段并脱敏 `HttpError.config.headers` |
 
 `start()` 返回的句柄只结束自己的生命周期，且只记录一次；顶层 `logger.complete()` 和 `logger.error()` 是 `record()` 的快捷方式，不会结束已有句柄。`redactHeaders` 可追加敏感 header；URL、错误消息和 `HttpError.config.url` 默认过滤 token、access_token、key、api_key、secret、password、signature 等敏感 query，支持编码和重复参数，普通参数保留。使用 `redactQueryParams: ['ticket']` 追加字段，或通过 `redactError: (sanitizedError) => ...` 处理业务错误中的其他敏感内容。
+
+### OpenTelemetry
+
+只有使用 `./opentelemetry` 时才需安装 `@opentelemetry/api`；应用负责配置 SDK/provider/exporter，并传入自己的 tracer。插件不会安装全局 provider，也不默认注入 trace headers。
+
+```bash
+pnpm add @opentelemetry/api
+```
+
+```typescript
+import { trace } from '@opentelemetry/api';
+import { createOpenTelemetryPlugin } from '@nexusmc-cn/axnexus/opentelemetry';
+
+const detachTelemetry = http.use(createOpenTelemetryPlugin({
+  tracer: trace.getTracer('my-app'),
+}));
+await http.get('/health');
+await detachTelemetry();
+```
+
+插件按逻辑请求和 attempt 建立 span，记录缓存、transport、排队、重试等待和流消费事件，结束事件用 `axnexus.duration_ms` 记录毫秒耗时；默认只记录方法、状态、耗时及错误分类，不写入请求 URL、headers、payload 或 context。
+
+## TanStack Query
+
+`./tanstack-query` 提供 `createQueryOptions`、`createInfiniteQueryOptions` 和 `createMutationOptions`，保留 schema 输出及客户端 context 类型。也可用 `createQueryIntegration(client)` 绑定客户端，调用 `.query(input)`、`.mutation<S, Variables>(input)` 和 `.infiniteQuery<Page, S>(input)`。使用时由应用安装 Query v5 的 `@tanstack/query-core`，也可把返回的 options 交给对应框架的 Query 适配层。
+
+```bash
+pnpm add @tanstack/query-core
+```
+
+```typescript
+import { QueryClient } from '@tanstack/query-core';
+import { createQueryOptions, createQueryIntegration } from '@nexusmc-cn/axnexus/tanstack-query';
+
+const queryClient = new QueryClient();
+const queries = createQueryIntegration(http);
+const options = createQueryOptions(http, {
+  url: '/users/me',
+  partition: ['session', 42, 'zh-CN'],
+  schema: userSchema,
+});
+const user = await queryClient.fetchQuery({ ...options, retry: 2 }); // User | null
+const mutation = queries.mutation<typeof userSchema, { name: string }>({
+  url: '/users',
+  schema: userSchema,
+});
+const created = await mutation.mutationFn({ name: 'Anna' }); // User | null
+```
+
+Query 管理缓存、重试和失效；这些 options 默认 `retry: false`，需要重试时在 Query 层显式配置。底层 axnexus 请求始终关闭重试和 GET 缓存，且由该次配置的 schema 负责输出校验。query/infinite 合并 Query 的取消 signal 与 `config.signal`，任一取消都会传递到底层；mutation 也保留 `config.signal`。
+
+mutation 的变量类型可用第二个泛型指定，响应由 schema 推导；自动重试仍需应用保证幂等。客户端带类型化 context 且需要显式指定 Variables 时，使用上述绑定工厂，避免 TypeScript 无法只推导剩余泛型而丢失客户端 context 类型；独立工厂仍适合完整推导的调用。
+
+query/infinite 的 `partition` 必填，使用非敏感的会话版本、租户和语言标识，身份变化时切换分区。默认 key 包含 URL 与普通 query 参数；普通 query 和 infinite query 使用不同命名空间。含凭据的 URL/params 需要显式提供非敏感 `key`，不要把 token、Cookie、Authorization 或密码放入 key。敏感字段检测沿用 logger 的默认名单，URL 中编码后的字段名也会识别；自定义敏感字段仍需调用方主动避开。显式 key 会替代 URL/params 部分，调用方须完整包含影响响应的筛选、排序、分页大小及其他分区条件。
+
+`createInfiniteQueryOptions` 另需 `initialPageParam`、`params(pageParam)` 和 `getNextPageParam`；其 key 不会自动展开参数函数，调用方须用显式 `key` 区分固定筛选和分页策略。每页结果同样按 schema 推导并包含可能的 `null`。
 
 ## CSRF
 

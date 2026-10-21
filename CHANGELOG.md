@@ -1,5 +1,24 @@
 # 变更记录
 
+## Unreleased
+
+### 新增
+
+- 依赖管理、构建、测试和 CI 统一使用 pnpm 11.25.0，以 `pnpm-lock.yaml` 固定依赖。
+- Standard Schema 输入/输出类型及推导工具；配置 schema 的客户端、完整响应方法和 JSON helpers 自动推导输出并保留空响应的 `null`，响应转换后的结果保守推导为 `unknown`。
+- `SchemaValidationError` 和类型守卫，提供结构化 issues 及其 message/path；响应校验失败保留可用的 HTTP 状态及响应上下文，无效 validator 结果明确失败。
+- `./stream`：增量 SSE/NDJSON 消费、逐消息 schema 校验、默认 1 MiB 消息限制、空闲超时和取消清理；SSE 可显式启用有次数上限的 GET 重连并携带 Last-Event-ID。
+- `./fetch`：专用 Fetch 桥接，接受 transport 配置白名单，保留原始请求/响应与 HTTP 状态，支持 oRPC 等可注入 Fetch 的 SDK，并提供 `close()`。
+- `./contracts`：端点 path/query/body/output 契约、按状态和 schema 匹配的业务错误、`bind`、`call` 和按 `kind` 判别的 `safeCall`；输入校验先于网络 I/O，调用预算及取消覆盖校验与网络全程。
+- 类型化本地 context、`plugins` / `use()` 插件生命周期、每客户端插件工厂，以及隔离观测异常的请求、attempt、transport、缓存和流结束事件。
+- `attachRequestLogger` / `createRequestLoggerPlugin` 自动日志接入，沿用既有脱敏规则，汇总缓存复用、attempt 数量以及排队、重试等待和原始流消费耗时。
+- 可选 `./opentelemetry` 插件，使用应用提供的 tracer，不安装 SDK 或默认注入 trace headers；可选 `./tanstack-query` 提供 schema 驱动的 query/infinite/mutation options、显式非敏感分区及取消集成，关闭底层重复缓存和重试。
+- Query 新增 `createQueryIntegration(client)` 绑定工厂，在显式指定 mutation 变量类型时保留客户端 context 类型；Query signal 与 `config.signal` 合并，敏感 key 检测复用日志默认名单并识别 URL 编码字段名。
+
+### 修复
+
+- 同一全局运行环境内同版本重复模块实例的 `HttpError` / `SchemaValidationError` 识别，避免丢失错误分类、响应、取消和超时信息，防止非重试错误被归一化为网络错误。
+
 ## 0.2.0 · 2026-10-17
 
 ### 升级注意

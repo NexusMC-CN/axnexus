@@ -111,8 +111,12 @@ test('native Fetch gzip enforces decoded bytes for JSON, raw and helper response
     // retain its declared-size guard even when Content-Encoding is present.
     await assert.rejects(readResponse(new Response('{}', { headers: { 'content-encoding': 'gzip', 'content-length': '22' } }), 'json', 10), code('ERR_MAX_BODY_SIZE'));
   } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => {
+      // Register close before forcing connections shut: Bun also stops the
+      // listener in closeAllConnections(), unlike Node's implementation.
+      server.close((error) => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    });
   }
 });
 

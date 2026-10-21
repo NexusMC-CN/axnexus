@@ -7,6 +7,14 @@ export interface RequestStartRecord {
   headers?: HeaderInput;
 }
 
+/** Accumulated lifecycle phase durations in milliseconds. */
+export interface RequestLogTimings {
+  queue: number;
+  retry: number;
+  /** Present when an exposed raw response body has finished. */
+  body?: number;
+}
+
 export interface RequestLogRecord {
   phase: 'start' | 'complete' | 'error';
   method?: string;
@@ -14,6 +22,9 @@ export interface RequestLogRecord {
   headers?: Record<string, string>;
   status?: number;
   duration?: number;
+  timings?: RequestLogTimings;
+  attempts?: number;
+  cache?: 'hit' | 'dedupe';
   responseBytes?: number;
   error?: unknown;
 }

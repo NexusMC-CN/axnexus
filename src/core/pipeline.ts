@@ -16,8 +16,9 @@ import {
   normalizeTimeout,
 } from './config.js';
 import { combineSignals, raceWithSignal, signalReason, sleep, TIMEOUT_REASON } from './control.js';
-import { HttpError, toError } from './errors.js';
-import { cancelBody, deferResponseBodyCleanup } from '../utils/response.js';
+import { HttpError, isHttpError, toError } from './errors.js';
+import { cancelBody, deferResponseBodyCleanup, observeResponseBody, type ResponseBodyOutcome } from '../utils/response.js';
+import type { RequestEvents, RequestEvent } from '../plugins/types.js';
 import {
   calculateRetryDelay,
   DEFAULT_RETRY_ON,
@@ -41,6 +42,7 @@ export interface RequestPipelineDeps {
   rateLimiter: RateLimiter;
   /** Releases adapter-owned transport resources created for this request. */
   releaseAdapterStream?: () => void;
+  events?: RequestEvents;
 }
 
 export async function runRequestPipeline<T>(
@@ -59,6 +61,21 @@ export async function runRequestPipeline<T>(
   } = deps;
   validateRequestOptions(input);
   const queuedAt = Date.now();
+  const eventStartedAt = performance.now();
+  const observationId = deps.events?.active() ? createRequestId() : '';
+  const eventConfig: RequestConfig = { ...defaults, ...input, context: input.context ?? defaults.context };
+  let requestEnded = false;
+  const emit = (phase: RequestEvent['phase'], details: Partial<RequestEvent> = {}) => {
+    if (!observationId) return;
+    const config = details.config ?? resolved ?? eventConfig;
+    const response = details.response ?? (isHttpError(details.error) ? details.error.response : undefined);
+    deps.events?.emit({ phase, requestId: observationId, config, context: config.context, ...details, response });
+  };
+  const endRequest = (details: Partial<RequestEvent> = {}) => {
+    if (requestEnded) return;
+    requestEnded = true;
+    emit('request:end', { ...details, duration: performance.now() - eventStartedAt });
+  };
   const totalTimeoutMs = validateTimeout(input.totalTimeout ?? defaults.totalTimeout, 'totalTimeout');
   const totalController = totalTimeoutMs > 0 ? new AbortController() : null;
   let totalTimeoutTriggered = false;
@@ -95,6 +112,7 @@ export async function runRequestPipeline<T>(
     }
   };
   try {
+    emit('request:start');
     // Do not start the interceptor chain for a request that is already
     // canceled: scheduling user callbacks after the caller has received a
     // cancellation error would run side effects they no longer expect.
@@ -110,7 +128,7 @@ export async function runRequestPipeline<T>(
     interceptedConfig = await raceWithSignal(
       applyInterceptorChain(requestInterceptors, {
         baseURL: defaults.baseURL, allowAbsoluteURL: defaults.allowAbsoluteURL,
-        credentials: defaults.credentials, ...input, headers: initialHeaders,
+        credentials: defaults.credentials, context: defaults.context, ...input, headers: initialHeaders,
       }, {
         signal: setupSignals.signal,
       }),
@@ -236,6 +254,15 @@ export async function runRequestPipeline<T>(
           attemptResolved.rateLimit?.signal,
         ]);
         let completedResponse: HttpResponse<unknown> | undefined;
+        const attemptStartedAt = performance.now();
+        let attemptError: unknown;
+        let attemptEnded = false;
+        const endAttempt = () => {
+          if (attemptEnded) return;
+          attemptEnded = true;
+          emit('attempt:end', { config: attemptResolved, attempt, response: completedResponse, error: attemptError, duration: performance.now() - attemptStartedAt });
+        };
+        emit('attempt:start', { config: attemptResolved, attempt });
         try {
           try {
             // Every attempt — including retries — passes back through the rate
@@ -246,36 +273,67 @@ export async function runRequestPipeline<T>(
               generatedRequestId: generatedRequestIdForCache,
             });
             const trackedAdapter: HttpAdapter = async config => {
+              const startedAt = performance.now();
+              emit('transport:start', { config, attempt });
               if (config.method !== 'GET') invalidatesCache = true;
-              return adapter(config);
+              try {
+                const result = await adapter(config);
+                emit('transport:end', { config, attempt, duration: performance.now() - startedAt });
+                return result;
+              } catch (error) {
+                emit('transport:end', { config, attempt, error, duration: performance.now() - startedAt });
+                throw error;
+              }
             };
             if (!cachePolicy.share) releaseAtEnd = true;
             const attemptAdapter = cachePolicy.share
-              ? snapshotAdapter(trackedAdapter, cache, cachePolicy, releaseAdapterStream) : trackedAdapter;
-            completedResponse = await rateLimiter.run((releaseSlot) => executeAttempt({
-              adapter: attemptAdapter,
-              config: attemptResolved,
-              defaults,
-              responseInterceptors,
-              retryOn,
-              overallSignal: attemptSignals.signal,
-              queuedAt,
-              // A retry interceptor may rewrite `timeout`, so the per-attempt
-              // value must be recomputed instead of reusing the first attempt's.
-              timeoutMs: normalizeTimeout(attemptResolved.timeout ?? defaults.timeout),
-              totalTimeoutEnabled: Boolean(totalController),
-              totalTimeoutTriggered: () => totalTimeoutTriggered,
-              rateLimiter,
-              // Release the concurrency slot before response interceptors run:
-              // they may await a nested request on this same client, which
-              // would otherwise never be able to start.
-              onAdapterSettled: releaseSlot,
-            }), {
-              ...(attemptResolved.rateLimit ?? {}),
-              signal: attemptSignals.signal,
-            });
+              ? snapshotAdapter(trackedAdapter, cache, cachePolicy, releaseAdapterStream, source => {
+                emit(source === 'cache' ? 'cache:hit' : 'cache:dedupe', { config: attemptResolved, attempt });
+              }) : trackedAdapter;
+            const queueStartedAt = performance.now();
+            let queueEnded = false;
+            const endQueue = (error?: unknown) => {
+              if (queueEnded) return;
+              queueEnded = true;
+              emit('queue:end', { config: attemptResolved, attempt, error, duration: performance.now() - queueStartedAt });
+            };
+            emit('queue:start', { config: attemptResolved, attempt });
+            try {
+              completedResponse = await rateLimiter.run((releaseSlot) => {
+                endQueue();
+                return executeAttempt({
+                  adapter: attemptAdapter,
+                  config: attemptResolved,
+                  defaults,
+                  responseInterceptors,
+                  retryOn,
+                  overallSignal: attemptSignals.signal,
+                  queuedAt,
+                  // A retry interceptor may rewrite `timeout`, so the per-attempt
+                  // value must be recomputed instead of reusing the first attempt's.
+                  timeoutMs: normalizeTimeout(attemptResolved.timeout ?? defaults.timeout),
+                  totalTimeoutEnabled: Boolean(totalController),
+                  totalTimeoutTriggered: () => totalTimeoutTriggered,
+                  rateLimiter,
+                  // Release the concurrency slot before response interceptors run:
+                  // they may await a nested request on this same client, which
+                  // would otherwise never be able to start.
+                  onAdapterSettled: releaseSlot,
+                  observeBody: Boolean(observationId),
+                });
+              }, {
+                ...(attemptResolved.rateLimit ?? {}),
+                signal: attemptSignals.signal,
+              });
+            } catch (error) {
+              if (!queueEnded) endQueue(toError(error, attemptResolved, totalTimeoutTriggered, Boolean(attemptSignals.signal?.aborted)));
+              throw error;
+            }
+            endAttempt();
             return completedResponse;
           } catch (error) {
+            attemptError = error;
+            endAttempt();
             const normalized = error instanceof HttpError
               ? error
               : toError(error, attemptResolved, totalTimeoutTriggered, Boolean(attemptSignals.signal?.aborted));
@@ -299,10 +357,14 @@ export async function runRequestPipeline<T>(
               attemptSignals.signal,
             ))) throw normalized;
             const retryContext: RetryContext = { error: normalized, retryCount, delay };
-            if (retry.beforeRetry) await raceWithSignal(retry.beforeRetry(retryContext), attemptSignals.signal);
+            const retryStartedAt = performance.now();
+            let retryError: unknown;
+            emit('retry:start', { config: attemptResolved, attempt: retryCount, error: normalized });
             try {
+              if (retry.beforeRetry) await raceWithSignal(retry.beforeRetry(retryContext), attemptSignals.signal);
               await sleep(delay, attemptSignals.signal);
             } catch (sleepError) {
+              retryError = toError(sleepError, attemptResolved, totalTimeoutTriggered, Boolean(attemptSignals.signal?.aborted));
               if (totalTimeoutTriggered) {
                 throw new HttpError('Request timed out', {
                   code: 'ETIMEDOUT',
@@ -313,9 +375,12 @@ export async function runRequestPipeline<T>(
                 });
               }
               throw sleepError;
+            } finally {
+              emit('retry:end', { config: attemptResolved, attempt: retryCount, error: retryError, duration: performance.now() - retryStartedAt });
             }
           }
         } finally {
+          endAttempt();
           if (!deferResponseBodyCleanup(completedResponse?.raw, attemptSignals.cleanup)) {
             attemptSignals.cleanup();
           }
@@ -327,6 +392,7 @@ export async function runRequestPipeline<T>(
     let pipelineCleanupResponse: Response | undefined;
     try {
       const result = await perform();
+      let bodyObserved = false;
       if (invalidatesCache) cache.clear();
       if (resolved?.responseType === 'response') {
         const response = result as HttpResponse<unknown>;
@@ -335,10 +401,29 @@ export async function runRequestPipeline<T>(
         if (fullResponse || response.data === response.raw) {
           pipelineCleanupResponse = response.raw;
           setupCleanupResponse = response.raw;
+          if (observationId) {
+            const bodyStartedAt = performance.now();
+            let bodyStarted = false;
+            let pendingOutcome: ResponseBodyOutcome | undefined;
+            const finishBody = (outcome: ResponseBodyOutcome) => {
+              emit('body:end', { response, bodyOutcome: outcome.kind, error: outcome.error, duration: performance.now() - bodyStartedAt });
+              endRequest({ response, bodyOutcome: outcome.kind, error: outcome.error });
+            };
+            bodyObserved = observeResponseBody(response.raw, outcome => {
+              if (bodyStarted) finishBody(outcome);
+              else pendingOutcome = outcome;
+            });
+            if (bodyObserved) {
+              emit('body:start', { response });
+              bodyStarted = true;
+              if (pendingOutcome) finishBody(pendingOutcome);
+            }
+          }
         } else {
           cancelBody(response.raw);
         }
       }
+      if (!bodyObserved) endRequest({ response: result });
       if (fullResponse) return result as HttpResponse<T>;
       return (result as HttpResponse<T>).data;
     } catch (error) {
@@ -400,6 +485,7 @@ export async function runRequestPipeline<T>(
       || setupRateLimit?.signal?.aborted,
     );
     const normalized = toError(error, fallbackConfig, totalTimeoutTriggered, setupCanceled);
+    endRequest({ error: normalized });
     notifyError(normalized);
     throw normalized;
   } finally {

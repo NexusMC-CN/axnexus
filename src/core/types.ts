@@ -47,7 +47,7 @@ export interface RetryOptions {
 }
 
 export type JsonParser = (text: string) => unknown | Promise<unknown>;
-export type StandardSchema<T = unknown> = import('./schema.js').StandardSchema<T>;
+export type StandardSchema<TOutput = unknown, TInput = unknown> = import('./schema.js').StandardSchema<TOutput, TInput>;
 export type JsonStringifier = (value: unknown) => string;
 export type RequestTransform = (data: unknown, headers: Headers) => unknown | Promise<unknown>;
 export type ResponseTransform = (data: unknown, response: Response) => unknown | Promise<unknown>;
@@ -59,7 +59,9 @@ export interface CacheOptions {
   partition?: string;
 }
 
-export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'headers' | 'method' | 'signal'> {
+export interface RequestConfig<TContext = unknown> extends Omit<RequestInit, 'body' | 'cache' | 'headers' | 'method' | 'signal'> {
+  /** Local request context; it is never automatically sent or added to cache keys. */
+  context?: TContext;
   url?: string;
   method?: string;
   headers?: import('../headers/headers.js').HeaderInput;
@@ -105,7 +107,7 @@ export interface RequestConfig extends Omit<RequestInit, 'body' | 'cache' | 'hea
 }
 
 /** Request config exposed to request interceptors after header normalization. */
-export type RequestInterceptorConfig = Omit<RequestConfig, 'headers'> & {
+export type RequestInterceptorConfig<TContext = unknown> = Omit<RequestConfig<TContext>, 'headers'> & {
   headers: import('../headers/headers.js').AxiosHeaders;
 };
 
@@ -140,42 +142,120 @@ export type HttpAdapter = ((config: ResolvedRequestConfig) => Promise<Response |
 export type InterceptorFulfilled<T> = (value: T) => T | Promise<T>;
 export type InterceptorRejected<T> = (error: unknown) => T | Promise<T>;
 
-export interface HttpClient {
-  request<T = unknown>(config: RequestConfig): Promise<T>;
-  request<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
-  requestResponse<T = unknown>(config: RequestConfig): Promise<HttpResponse<T>>;
-  requestResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
-  get<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
-  getResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
-  head<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
-  headResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
-  options<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
-  optionsResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
-  trace<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
-  traceResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
-  connect<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
-  connectResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
-  post<T = unknown, B = unknown>(url: string, data?: B, config?: RequestConfig): Promise<T>;
-  postResponse<T = unknown, B = unknown>(url: string, data?: B, config?: RequestConfig): Promise<HttpResponse<T>>;
-  put<T = unknown, B = unknown>(url: string, data?: B, config?: RequestConfig): Promise<T>;
-  putResponse<T = unknown, B = unknown>(url: string, data?: B, config?: RequestConfig): Promise<HttpResponse<T>>;
-  patch<T = unknown, B = unknown>(url: string, data?: B, config?: RequestConfig): Promise<T>;
-  patchResponse<T = unknown, B = unknown>(url: string, data?: B, config?: RequestConfig): Promise<HttpResponse<T>>;
-  delete<T = unknown>(url: string, config?: RequestConfig): Promise<T>;
-  deleteResponse<T = unknown>(url: string, config?: RequestConfig): Promise<HttpResponse<T>>;
+/** Request calls without a schema retain the explicit response-generic API. */
+export type NoSchemaRequestConfig<TContext = unknown> = RequestConfig<TContext> & { schema?: undefined };
+export type SchemaRequestConfig<TContext = unknown> = RequestConfig<TContext> & { schema: StandardSchema };
+
+type KeysOfUnion<T> = T extends unknown ? keyof T : never;
+type HasDefaultSchema<TDefaults> = 'schema' extends KeysOfUnion<TDefaults> ? true : false;
+type DefaultSchema<TDefaults> = [TDefaults] extends [{ schema: infer TSchema extends StandardSchema }]
+  ? TSchema
+  : never;
+type HasNoTransformMember<TConfig> = 'transformResponse' extends keyof TConfig
+  ? Exclude<TConfig[keyof TConfig & 'transformResponse'], undefined> extends never
+    ? true
+    : Exclude<TConfig[keyof TConfig & 'transformResponse'], undefined> extends readonly [] ? true : false
+  : true;
+type HasNoTransform<TConfig> = false extends (TConfig extends unknown ? HasNoTransformMember<TConfig> : never) ? false : true;
+type HasNoEffectiveTransform<TConfig, TDefaults> = TConfig extends { transformResponse: infer TTransform }
+  ? [TTransform] extends [undefined]
+    ? HasNoTransform<TDefaults>
+    : TTransform extends readonly [] ? true : false
+  : HasNoTransform<TConfig> extends true ? HasNoTransform<TDefaults> : false;
+
+/** A schema is applied before transforms; transformed outputs are deliberately unknown. */
+export type SchemaResponseData<TConfig extends { schema: StandardSchema }, TDefaults = {}> =
+  HasNoEffectiveTransform<TConfig, TDefaults> extends true
+    ? import('./schema.js').InferSchemaOutput<TConfig['schema']> | null
+    : unknown;
+export type DefaultSchemaResponseData<TConfig, TDefaults> =
+  'schema' extends KeysOfUnion<TConfig> ? unknown : HasNoEffectiveTransform<TConfig, TDefaults> extends true
+    ? [DefaultSchema<TDefaults>] extends [never] ? unknown : import('./schema.js').InferSchemaOutput<DefaultSchema<TDefaults>> | null
+    : unknown;
+
+interface DataRequest<TContext, TDefaults> {
+  <const TConfig extends SchemaRequestConfig<TContext>>(config: TConfig): Promise<SchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends SchemaRequestConfig<TContext>>(url: string, config: TConfig): Promise<SchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}>(config: HasDefaultSchema<TDefaults> extends true ? TConfig : never): Promise<DefaultSchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config?: TConfig] : [config: never]): Promise<DefaultSchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends RequestConfig<TContext>>(config: TConfig): Promise<unknown>;
+  <const TConfig extends RequestConfig<TContext>>(url: string, config: TConfig): Promise<unknown>;
+  <T = unknown>(config: HasDefaultSchema<TDefaults> extends true ? never : NoSchemaRequestConfig<TContext>): Promise<T>;
+  <T = unknown>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config: never] : [config?: NoSchemaRequestConfig<TContext>]): Promise<T>;
+}
+
+interface ResponseRequest<TContext, TDefaults> {
+  <const TConfig extends SchemaRequestConfig<TContext>>(config: TConfig): Promise<HttpResponse<SchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends SchemaRequestConfig<TContext>>(url: string, config: TConfig): Promise<HttpResponse<SchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}>(config: HasDefaultSchema<TDefaults> extends true ? TConfig : never): Promise<HttpResponse<DefaultSchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config?: TConfig] : [config: never]): Promise<HttpResponse<DefaultSchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends RequestConfig<TContext>>(config: TConfig): Promise<HttpResponse<unknown>>;
+  <const TConfig extends RequestConfig<TContext>>(url: string, config: TConfig): Promise<HttpResponse<unknown>>;
+  <T = unknown>(config: HasDefaultSchema<TDefaults> extends true ? never : NoSchemaRequestConfig<TContext>): Promise<HttpResponse<T>>;
+  <T = unknown>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config: never] : [config?: NoSchemaRequestConfig<TContext>]): Promise<HttpResponse<T>>;
+}
+
+interface DataMethod<TContext, TDefaults> {
+  <const TConfig extends SchemaRequestConfig<TContext>>(url: string, config: TConfig): Promise<SchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config?: TConfig] : [config: never]): Promise<DefaultSchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends RequestConfig<TContext>>(url: string, config: TConfig): Promise<unknown>;
+  <T = unknown>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config: never] : [config?: NoSchemaRequestConfig<TContext>]): Promise<T>;
+}
+
+interface ResponseMethod<TContext, TDefaults> {
+  <const TConfig extends SchemaRequestConfig<TContext>>(url: string, config: TConfig): Promise<HttpResponse<SchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config?: TConfig] : [config: never]): Promise<HttpResponse<DefaultSchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends RequestConfig<TContext>>(url: string, config: TConfig): Promise<HttpResponse<unknown>>;
+  <T = unknown>(url: string, ...args: HasDefaultSchema<TDefaults> extends true ? [config: never] : [config?: NoSchemaRequestConfig<TContext>]): Promise<HttpResponse<T>>;
+}
+
+interface DataBodyMethod<TContext, TDefaults> {
+  <const TConfig extends SchemaRequestConfig<TContext>, B = unknown>(url: string, data: B | undefined, config: TConfig): Promise<SchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}, B = unknown>(url: string, data?: B, ...args: HasDefaultSchema<TDefaults> extends true ? [config?: TConfig] : [config: never]): Promise<DefaultSchemaResponseData<TConfig, TDefaults>>;
+  <const TConfig extends RequestConfig<TContext>, B = unknown>(url: string, data: B | undefined, config: TConfig): Promise<unknown>;
+  <T = unknown, B = unknown>(url: string, data?: B, ...args: HasDefaultSchema<TDefaults> extends true ? [config: never] : [config?: NoSchemaRequestConfig<TContext>]): Promise<T>;
+}
+
+interface ResponseBodyMethod<TContext, TDefaults> {
+  <const TConfig extends SchemaRequestConfig<TContext>, B = unknown>(url: string, data: B | undefined, config: TConfig): Promise<HttpResponse<SchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends NoSchemaRequestConfig<TContext> = {}, B = unknown>(url: string, data?: B, ...args: HasDefaultSchema<TDefaults> extends true ? [config?: TConfig] : [config: never]): Promise<HttpResponse<DefaultSchemaResponseData<TConfig, TDefaults>>>;
+  <const TConfig extends RequestConfig<TContext>, B = unknown>(url: string, data: B | undefined, config: TConfig): Promise<HttpResponse<unknown>>;
+  <T = unknown, B = unknown>(url: string, data?: B, ...args: HasDefaultSchema<TDefaults> extends true ? [config: never] : [config?: NoSchemaRequestConfig<TContext>]): Promise<HttpResponse<T>>;
+}
+
+export interface HttpClient<TContext = unknown, TDefaults = {}> {
+  request: DataRequest<TContext, TDefaults>;
+  requestResponse: ResponseRequest<TContext, TDefaults>;
+  get: DataMethod<TContext, TDefaults>;
+  getResponse: ResponseMethod<TContext, TDefaults>;
+  head: DataMethod<TContext, TDefaults>;
+  headResponse: ResponseMethod<TContext, TDefaults>;
+  options: DataMethod<TContext, TDefaults>;
+  optionsResponse: ResponseMethod<TContext, TDefaults>;
+  trace: DataMethod<TContext, TDefaults>;
+  traceResponse: ResponseMethod<TContext, TDefaults>;
+  connect: DataMethod<TContext, TDefaults>;
+  connectResponse: ResponseMethod<TContext, TDefaults>;
+  delete: DataMethod<TContext, TDefaults>;
+  deleteResponse: ResponseMethod<TContext, TDefaults>;
+  post: DataBodyMethod<TContext, TDefaults>;
+  postResponse: ResponseBodyMethod<TContext, TDefaults>;
+  put: DataBodyMethod<TContext, TDefaults>;
+  putResponse: ResponseBodyMethod<TContext, TDefaults>;
+  patch: DataBodyMethod<TContext, TDefaults>;
+  patchResponse: ResponseBodyMethod<TContext, TDefaults>;
   clearCache(): void;
-  /**
-   * Release transports the adapter holds open (for example HTTP/2 sessions).
-   * Without this an idle session can keep a one-shot process alive.
-   */
+  /** Release client plugin and transport resources. */
   close(): void | Promise<void>;
+  use(plugin: import('../plugins/types.js').HttpPlugin<TContext>): () => Promise<void>;
   interceptors: {
-    request: import('./interceptors.js').RequestInterceptorManager;
+    request: import('./interceptors.js').RequestInterceptorManager<TContext>;
     response: import('./interceptors.js').InterceptorManager<HttpResponse<unknown>>;
   };
 }
 
-export interface HttpClientConfig extends Omit<RequestConfig, 'method' | 'body' | 'data' | 'params'> {
+export interface HttpClientConfig<TContext = unknown> extends Omit<RequestConfig<TContext>, 'method' | 'body' | 'data' | 'params'> {
+  plugins?: readonly import('../plugins/types.js').HttpPlugin<TContext>[];
   baseURL?: string;
   headers?: import('../headers/headers.js').HeaderInput;
   credentials?: RequestCredentials;

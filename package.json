@@ -1,6 +1,7 @@
 {
   "name": "@nexusmc-cn/axnexus",
   "version": "0.2.0",
+  "packageManager": "pnpm@11.25.0",
   "description": "A small, typed, fetch-based HTTP client with Axios-style instances.",
   "license": "MIT",
   "repository": {
@@ -51,6 +52,34 @@
     "./node-http3": {
       "types": "./dist/adapters/node-http3.d.ts",
       "import": "./dist/adapters/node-http3.js"
+    },
+    "./stream": {
+      "types": "./dist/stream/index.d.ts",
+      "import": "./dist/stream/index.js"
+    },
+    "./fetch": {
+      "types": "./dist/bridges/index.d.ts",
+      "import": "./dist/bridges/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "import": "./dist/contracts/index.js"
+    },
+    "./plugins": {
+      "types": "./dist/plugins/index.d.ts",
+      "import": "./dist/plugins/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability/index.d.ts",
+      "import": "./dist/observability/index.js"
+    },
+    "./opentelemetry": {
+      "types": "./dist/integrations/opentelemetry.d.ts",
+      "import": "./dist/integrations/opentelemetry.js"
+    },
+    "./tanstack-query": {
+      "types": "./dist/integrations/tanstack-query.d.ts",
+      "import": "./dist/integrations/tanstack-query.js"
     }
   },
   "files": [
@@ -60,13 +89,34 @@
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "npm run clean && tsc -p tsconfig.json",
-    "build:bun": "bun scripts/clean.mjs && bun x tsc -p tsconfig.json",
-    "test": "npm run build && node --test --experimental-strip-types \"tests/**/*.test.ts\"",
-    "test:bun": "bun run build:bun && bun test tests",
-    "prepack": "npm run build"
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "build:bun": "pnpm run clean && bun ./node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test": "pnpm run build && node --test --experimental-strip-types \"tests/**/*.test.ts\"",
+    "test:bun": "pnpm run build:bun && bun test --cwd tests",
+    "test:types": "tsc -p tsconfig.types.json",
+    "test:consumer": "node scripts/consumer-test.mjs",
+    "test:browser": "playwright test",
+    "prepack": "pnpm run build"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.9.0 <2",
+    "@tanstack/query-core": "^5.104.5"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
+    "@tanstack/query-core": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace": "^2.12.0",
+    "@orpc/client": "^1.15.7",
+    "@orpc/server": "^1.15.7",
+    "@playwright/test": "^1.64.1",
+    "@tanstack/query-core": "^5.104.5",
     "typescript": "^5.9.3"
   }
 }

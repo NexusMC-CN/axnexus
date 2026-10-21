@@ -38,20 +38,20 @@ function normalizeRequestConfig(config: RequestConfig, base?: RequestConfig): Re
  * Request interceptors always receive AxiosHeaders, while accepting native
  * Headers and plain header objects when a callback returns a new config.
  */
-export class RequestInterceptorManager extends InterceptorManager<RequestConfig> {
+export class RequestInterceptorManager<TContext = unknown> extends InterceptorManager<RequestConfig<TContext>> {
   override use(
-    fulfilled?: (value: RequestInterceptorConfig) => RequestConfig | Promise<RequestConfig>,
-    rejected?: (error: unknown) => RequestConfig | Promise<RequestConfig>,
+    fulfilled?: (value: RequestInterceptorConfig<TContext>) => RequestConfig<TContext> | Promise<RequestConfig<TContext>>,
+    rejected?: (error: unknown) => RequestConfig<TContext> | Promise<RequestConfig<TContext>>,
   ): number {
     const normalizedFulfilled = fulfilled
-      ? async (value: RequestConfig): Promise<RequestConfig> => {
+      ? async (value: RequestConfig<TContext>): Promise<RequestConfig<TContext>> => {
         const normalized = normalizeRequestConfig(value);
-        const next = await fulfilled(normalized as RequestInterceptorConfig);
-        return normalizeRequestConfig(next, normalized);
+        const next = await fulfilled(normalized as RequestInterceptorConfig<TContext>);
+        return normalizeRequestConfig(next, normalized) as RequestConfig<TContext>;
       }
       : undefined;
     const normalizedRejected = rejected
-      ? async (error: unknown): Promise<RequestConfig> => normalizeRequestConfig(await rejected(error))
+      ? async (error: unknown): Promise<RequestConfig<TContext>> => normalizeRequestConfig(await rejected(error)) as RequestConfig<TContext>
       : undefined;
     return super.use(normalizedFulfilled, normalizedRejected);
   }
@@ -61,8 +61,8 @@ export function createInterceptorManager<T>(): InterceptorManager<T> {
   return new InterceptorManager<T>();
 }
 
-export function createRequestInterceptorManager(): RequestInterceptorManager {
-  return new RequestInterceptorManager();
+export function createRequestInterceptorManager<TContext = unknown>(): RequestInterceptorManager<TContext> {
+  return new RequestInterceptorManager<TContext>();
 }
 
 export async function applyInterceptorChain<T>(

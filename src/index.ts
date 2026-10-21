@@ -3,7 +3,10 @@ export { createHttpClient } from './core/client.js';
 export type * from './core/types.js';
 export { HttpError, isHttpError } from './core/errors.js';
 export type { HttpErrorCode } from './core/errors.js';
-export type { StandardSchema, StandardSchemaIssue, StandardSchemaResult } from './core/schema.js';
+export { SchemaValidationError, isSchemaValidationError, validateStandardSchema } from './core/schema.js';
+export type { StandardSchema, StandardSchemaIssue, StandardSchemaResult, StandardSchemaSuccessResult, StandardSchemaFailureResult, InferSchemaInput, InferSchemaOutput } from './core/schema.js';
+export type { HttpPlugin, RequestEvent, RequestPhase } from './plugins/types.js';
+export { attachRequestLogger, createRequestLoggerPlugin } from './observability/attach.js';
 export {
   InterceptorManager,
   RequestInterceptorManager,
@@ -40,6 +43,7 @@ export type { FetchJsonOptions, FetchJsonResult } from './server/json.js';
 export { createRequestLogger } from './observability/request-logger.js';
 export type {
   RequestLogRecord,
+  RequestLogTimings,
   RequestLogInput,
   RequestLoggerOptions,
   RequestStartRecord,
