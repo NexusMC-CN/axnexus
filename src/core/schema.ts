@@ -38,7 +38,7 @@ export class SchemaValidationError extends Error {
   readonly issues: readonly StandardSchemaIssue[];
 
   static {
-    const key = Symbol.for('@nexusmc-cn/axnexus@0.2.0/SchemaValidationError/prototypes');
+    const key = Symbol.for('@nexusmc-cn/axnexus@0.3.0/SchemaValidationError/prototypes');
     const registry = globalThis as typeof globalThis & { [key: symbol]: unknown };
     schemaErrorPrototypes = (registry[key] ??= new WeakSet<object>()) as WeakSet<object>;
     schemaErrorPrototypes.add(SchemaValidationError.prototype);
