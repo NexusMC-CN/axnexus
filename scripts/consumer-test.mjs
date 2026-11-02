@@ -30,6 +30,7 @@ try {
   assert.equal(dirname(tarball), resolve(temporary));
   await access(tarball);
   assert(packed.files.some(file => file.path === 'dist/stream/index.js'));
+  assert(packed.files.some(file => file.path === 'src/index.ts'), 'Missing source for published source maps');
   for (const entry of ['dist/selection/index.js', 'dist/selection/index.d.ts',
     'dist/selection/server/index.js', 'dist/selection/server/index.d.ts',
     'dist/integrations/fastify.js', 'dist/integrations/fastify.d.ts']) {
@@ -97,7 +98,7 @@ await client.close();`;
   await check();
   manifest.dependencies['@opentelemetry/api'] = '1.9.0';
   manifest.dependencies['@tanstack/query-core'] = '5.104.5';
-  manifest.dependencies.fastify = '5.12.5';
+  manifest.dependencies.fastify = '5.12.8';
   manifest.devDependencies = { '@types/node': '22.20.5' };
   await install();
   await writeFile(join(temporary, 'types', 'integrations.ts'), rewrite(await readFile(join(root, 'tests/types/integrations.ts'), 'utf8')));
@@ -106,9 +107,15 @@ await client.close();`;
   await writeFile(join(temporary, 'optional.mjs'), `import {createOpenTelemetryPlugin} from '${packageName}/opentelemetry';
 import {createQueryOptions} from '${packageName}/tanstack-query';
 import {createFastifySelectionPlugin,toWebRequest,sendWebResponse} from '${packageName}/fastify';
-if([createOpenTelemetryPlugin,createQueryOptions,createFastifySelectionPlugin,toWebRequest,sendWebResponse].some(value => typeof value !== 'function')) throw new Error('Optional export failed');`);
+import Fastify from 'fastify';
+if([createOpenTelemetryPlugin,createQueryOptions,createFastifySelectionPlugin,toWebRequest,sendWebResponse].some(value => typeof value !== 'function')) throw new Error('Optional export failed');
+const app = Fastify();
+app.get('/bridge', async (request, reply) => sendWebResponse(reply, new Response(JSON.stringify({url: toWebRequest(request, {reply}).url}), {headers: {'content-type': 'application/json'}})));
+const response = await app.inject({method: 'GET', url: '/bridge'});
+if(response.statusCode !== 200 || response.json().url !== 'http://axnexus.invalid/bridge') throw new Error('Minimum Fastify peer bridge failed');
+await app.close();`);
   run(join(temporary, 'optional.mjs'), []);
-  console.log('Tarball consumer passed: core without peers, optional entries, NodeNext and Bundler types.');
+  console.log('Tarball consumer passed: core without peers, optional entries, minimum Fastify peer, NodeNext and Bundler types.');
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }
