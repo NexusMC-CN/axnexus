@@ -123,6 +123,27 @@ test('handler rejects unsupported route and duplicate resources at setup', async
   assert.throws(() => createSelectionHandler({ resources: [resource, resource], limits }), /duplicate/i);
 });
 
+test('handler accepts a configured endpoint while preserving the default route', async () => {
+  const simple = defineSelectionResource({ resource: 'route.byId.v1', args, fields: { id: leaf(string) } });
+  const resource = implementSelection(simple, { authorizeResource: () => true, load: ({ args: input }) => ({ id: input.id }),
+    fields: { id: { resolve: ({ parent }) => parent.id } } });
+  const makeRequest = (path: string) => new Request(`https://test.example${path}`, { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ protocol: 'axnexus.selection',
+      version: 1, resource: simple.resource, args: { id: '42' }, select: { id: true } }) });
+  const defaultHandler = createSelectionHandler({ resources: [resource], limits });
+  assert.equal((await defaultHandler(makeRequest('/__axnexus/select'), {})).status, 200);
+  const customHandler = createSelectionHandler({ resources: [resource], limits, endpoint: '/api/select' });
+  assert.deepEqual(await (await customHandler(makeRequest('/api/select?source=client'), {})).json(), { data: { id: '42' } });
+  assert.equal((await customHandler(makeRequest('/__axnexus/select'), {})).status, 400);
+});
+
+test('handler rejects noncanonical endpoint configuration at setup', () => {
+  for (const endpoint of ['', 'api/select', '//other.test/select', 'https://other.test/select',
+    '/api/select?x=1', '/api/select#part', '/api/../select', '/api/%2e%2e/select', '/api\\select']) {
+    assert.throws(() => createSelectionHandler({ resources: [], limits, endpoint }), /endpoint/i, endpoint);
+  }
+});
+
 test('resource refusal prevents root load and all field work', async () => {
   let loads = 0;
   const simple = defineSelectionResource({ resource: 'simple.byId.v1', args, fields: { id: leaf(string) } });
