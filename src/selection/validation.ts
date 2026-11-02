@@ -89,6 +89,7 @@ export async function validateSelectedData(fields: FieldMap, selection: Selectio
       if (output[name] === undefined) throw new TypeError(`Selected field ${name} is undefined`);
       if (output[name] === null && !field.nullable) throw new TypeError(`Non-null field ${name} is null`);
       if (typeof output[name] === 'object' && output[name] !== null) throw new TypeError(`Selected field ${name} is not scalar`);
+      if (typeof output[name] === 'number' && !Number.isFinite(output[name])) throw new TypeError(`Selected field ${name} is not a finite number`);
     } else if (field.kind === 'object') output[name] = await validateSelectedData(field.fields, nested as SelectionTree, value, signal);
     else {
       if (!Array.isArray(value)) throw new TypeError(`Array field ${name} is not an array`);

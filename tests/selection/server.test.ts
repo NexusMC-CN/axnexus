@@ -207,6 +207,15 @@ test('non-null leaf schemas cannot turn a value into null', async () => {
   assert.equal((await handler(request({ id: true }, { resource: nullContract.resource }), {})).status, 500);
 });
 
+test('non-finite leaf numbers cannot serialize as null', async () => {
+  const numberSchema = { '~standard': { validate: () => ({ value: Number.POSITIVE_INFINITY }) } };
+  const numericContract = defineSelectionResource({ resource: 'unsafe.number.v1', args, fields: { count: leaf(numberSchema) } });
+  const resource = implementSelection(numericContract, { authorizeResource: () => true, load: () => ({}), fields: { count: { resolve: () => 1 } } });
+  const handler = createSelectionHandler({ resources: [resource], limits });
+  const result = await handler(request({ count: true }, { resource: numericContract.resource }), {});
+  assert.equal(result.status, 500);
+});
+
 test('depth and field count budgets reject before resource authorization', async () => {
   const depth = setup();
   const restrictedDepth = createSelectionHandler({ resources: [implementSelection(contract, { authorizeResource: () => { depth.seen.push('resourceAuth'); return true; }, load: () => null, fields: {

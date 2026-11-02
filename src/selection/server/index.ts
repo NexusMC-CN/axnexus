@@ -89,6 +89,7 @@ async function execute(fields: FieldMap, implementations: Record<string, FieldIm
       if (validated === undefined) throw new TypeError('Selected field must have a defined value');
       if (validated === null && !field.nullable) throw new TypeError('Non-null field is null');
       if (typeof validated === 'object' && validated !== null) throw new TypeError('Leaf field must be a scalar');
+      if (typeof validated === 'number' && !Number.isFinite(validated)) throw new TypeError('Leaf number must be finite');
       data[name] = validated;
     }
     else if (field.kind === 'object') {
