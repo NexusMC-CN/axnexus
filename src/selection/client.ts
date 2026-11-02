@@ -5,6 +5,7 @@ import { validateStandardSchema } from '../core/schema.js';
 import { HttpError, isHttpError } from '../core/errors.js';
 import type { HttpClient, HttpResponse, RequestConfig } from '../core/types.js';
 import type { ExactSelection, SelectionArgs, SelectionFor, SelectionResource, SelectionResult } from './contract.js';
+import type { SelectionPlan } from './plans.js';
 import { SelectionError } from './errors.js';
 import { isRecord, SelectionFault, validateSelectedData, validateSelectionTree } from './validation.js';
 import { combineSignals } from '../utils/signal.js';
@@ -57,8 +58,8 @@ export function createSelectionClient<Client extends Pick<HttpClient<any, any>, 
   client: Client, options: SelectionClientOptions,
 ) {
   validateEndpoint(options?.endpoint);
-  const select = async <R extends SelectionResource, const S extends SelectionFor<R['fields']>>(
-      resource: R, input: { args: SelectionArgs<R>; select: S & ExactSelection<R['fields'], S> }, config: SelectionRequestConfig<ContextOf<Client>> = {},
+  const run = async <R extends SelectionResource, const S extends SelectionFor<R['fields']>>(
+      resource: R, input: { args: SelectionArgs<R>; select: S }, config: SelectionRequestConfig<ContextOf<Client>> = {}, planId?: string,
     ): Promise<SelectionResult<R, S>> => {
       let selection;
       try { selection = validateSelectionTree(resource.fields, input.select, localLimits); }
@@ -88,7 +89,9 @@ export function createSelectionClient<Client extends Pick<HttpClient<any, any>, 
           headers,
           url: options.endpoint,
           method: 'POST',
-          data: { protocol: 'axnexus.selection', version: 1, resource: resource.resource, args, select: selection },
+          data: planId === undefined
+            ? { protocol: 'axnexus.selection', version: 1, resource: resource.resource, args, select: selection }
+            : { protocol: 'axnexus.selection', version: 1, plan: planId, args },
           schema: undefined,
           transformRequest: [],
           transformResponse: [],
@@ -137,5 +140,16 @@ export function createSelectionClient<Client extends Pick<HttpClient<any, any>, 
         combined.cleanup();
       }
     };
-  return { select };
+  const select = <R extends SelectionResource, const S extends SelectionFor<R['fields']>>(
+    resource: R, input: { args: SelectionArgs<R>; select: S & ExactSelection<R['fields'], S> },
+    config: SelectionRequestConfig<ContextOf<Client>> = {},
+  ): Promise<SelectionResult<R, S>> => run<R, S>(resource, input, config);
+  const execute = <R extends SelectionResource, const S extends SelectionFor<R['fields']>>(
+    plan: SelectionPlan<R, S>, input: { args: SelectionArgs<R> },
+    config: SelectionRequestConfig<ContextOf<Client>> = {},
+  ): Promise<SelectionResult<R, S>> => {
+    if (!plan || typeof plan.id !== 'string' || !plan.id || !plan.contract) throw new TypeError('Invalid selection plan');
+    return run<R, S>(plan.contract, { args: input.args, select: plan.select }, config, plan.id);
+  };
+  return { select, execute };
 }

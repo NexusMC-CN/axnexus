@@ -32,17 +32,29 @@ test('the published root ESM entry imports and performs a browser request', asyn
   expect(result).toEqual({ status: 200, method: 'GET', fetchAdapter: 'function', xhrAdapter: 'function' });
 });
 
-test('selection entry imports in a browser and validates a selected response', async ({ page }) => {
+test('selection entry imports in a browser and executes dynamic and registered selections', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const { createHttpClient } = await import('/dist/index.js');
-    const { createSelectionClient, defineSelectionResource, leaf } = await import('/dist/selection/index.js');
+    const { createSelectionClient, defineSelectionPlan, defineSelectionResource, describeSelectionResource, leaf } = await import('/dist/selection/index.js');
     const string = { '~standard': { validate(value: unknown) { return typeof value === 'string' ? { value } : { issues: [{ message: 'string required' }] }; } } };
     const resource = defineSelectionResource({ resource: 'browser.byId.v1', args: string, fields: { id: leaf(string) } });
-    const http = createHttpClient({ adapter: async () => Response.json({ data: { id: 'browser' } }) });
-    try { return await createSelectionClient(http, { endpoint: '/__axnexus/select' }).select(resource, { args: '42', select: { id: true } }); }
+    const plan = defineSelectionPlan('browser.summary.v1', resource, { id: true });
+    const sent: string[] = [];
+    const http = createHttpClient({ adapter: async (config) => {
+      const body = JSON.parse(String(config.body));
+      sent.push(body.plan ?? body.resource);
+      return Response.json({ data: { id: 'browser' } });
+    } });
+    try {
+      const client = createSelectionClient(http, { endpoint: '/__axnexus/select' });
+      return { dynamic: await client.select(resource, { args: '42', select: { id: true } }),
+        registered: await client.execute(plan, { args: '42' }),
+        resource: describeSelectionResource(resource).resource, sent };
+    }
     finally { await http.close(); }
   });
-  expect(result).toEqual({ id: 'browser' });
+  expect(result).toEqual({ dynamic: { id: 'browser' }, registered: { id: 'browser' },
+    resource: 'browser.byId.v1', sent: ['browser.byId.v1', 'browser.summary.v1'] });
 });
 
 for (const transport of ['fetch', 'xhr'] as const) {

@@ -52,10 +52,10 @@ try {
 import { parseSSE } from '${packageName}/stream';
 import { createFetchHandler } from '${packageName}/fetch';
 import { defineEndpoint } from '${packageName}/contracts';
-import { defineSelectionResource, leaf, createSelectionClient } from '${packageName}/selection';
-import { implementSelection, createSelectionHandler } from '${packageName}/selection/server';
+import { defineSelectionResource, leaf, createSelectionClient, defineSelectionPlan, describeSelectionResource, inspectSelection } from '${packageName}/selection';
+import { implementSelection, createSelectionHandler, paginateSelection, createSelectionBatchLoader, withSelectionLoaders } from '${packageName}/selection/server';
 import { createRequestLogger } from '${packageName}/observability';
-if ([createHttpClient,HttpError,SchemaValidationError,parseSSE,createFetchHandler,defineEndpoint,defineSelectionResource,leaf,createSelectionClient,implementSelection,createSelectionHandler,createRequestLogger].some(value => typeof value !== 'function')) throw new Error('Missing export');
+if ([createHttpClient,HttpError,SchemaValidationError,parseSSE,createFetchHandler,defineEndpoint,defineSelectionResource,leaf,createSelectionClient,defineSelectionPlan,describeSelectionResource,inspectSelection,implementSelection,createSelectionHandler,paginateSelection,createSelectionBatchLoader,withSelectionLoaders,createRequestLogger].some(value => typeof value !== 'function')) throw new Error('Missing export');
 const client = createHttpClient({adapter: async () => new Response('{"ok":true}')});
 const value = await client.get('https://consumer.test/');
 if (!value.ok) throw new Error('Consumer request failed');
@@ -63,7 +63,8 @@ await client.close();`;
   await writeFile(join(temporary, 'consumer.mjs'), core);
   run(join(temporary, 'consumer.mjs'), []);
 
-  const fixtures = ['tests/types/schema.ts', 'tests/types/contracts.ts', 'tests/types/selection.ts', 'tests/stream/types.ts'];
+  const fixtures = ['tests/types/schema.ts', 'tests/types/contracts.ts', 'tests/types/selection.ts',
+    'tests/types/selection-plans.ts', 'tests/types/selection-loaders.ts', 'tests/stream/types.ts'];
   const rewrite = source => source
     .replaceAll('../../src/core/client.js', packageName)
     .replaceAll('../../src/core/types.js', packageName)
@@ -72,6 +73,10 @@ await client.close();`;
     .replaceAll('../../src/index.js', packageName)
     .replaceAll('../../src/contracts/index.js', `${packageName}/contracts`)
     .replaceAll('../../src/selection/index.js', `${packageName}/selection`)
+    .replaceAll('../../src/selection/contract.js', `${packageName}/selection`)
+    .replaceAll('../../src/selection/plans.js', `${packageName}/selection`)
+    .replaceAll('../../src/selection/server/batch-loader.js', `${packageName}/selection/server`)
+    .replaceAll('../../src/selection/server/index.js', `${packageName}/selection/server`)
     .replaceAll('../../src/bridges/index.js', `${packageName}/fetch`)
     .replaceAll('../../src/stream/index.js', `${packageName}/stream`)
     .replaceAll('../../src/plugins/index.js', `${packageName}/plugins`)

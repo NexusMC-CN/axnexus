@@ -194,14 +194,14 @@ const loadPage = (args: { first: number; after?: string }, signal: AbortSignal) 
 // loadPage 的结果是 { items, pageInfo: { endCursor, hasNextPage } }。
 ```
 
-辅助函数向 `load` 传入 `limit = first + 1`，并拒绝超量结果；额外一条用于判断 `hasNextPage`。将 `items` 和 `pageInfo` 定义为资源公开字段，`maxArrayLength` 至少应覆盖允许的最大页长。返回结构不包含总数。
+辅助函数向 `load` 传入 `limit = first + 1`，并拒绝超量结果；额外一条用于判断 `hasNextPage`。游标必须对应稳定且唯一的排序键，数据源须按同一顺序查询。将 `items` 和 `pageInfo` 定义为资源公开字段，`maxArrayLength` 至少应覆盖允许的最大页长。返回结构不包含总数。
 
 ### 请求内批量加载
 
-当列表中的多个条目需要读取关联数据时，使用 `createSelectionBatchLoader` 合并同一请求内的读取。通过处理器的 `createLoaders` 为每个请求创建 loader，resolver 从 `loaders` 取得它；请求结束即释放该实例，避免跨用户复用授权相关数据。
+当列表中的多个条目需要读取关联数据时，使用 `createSelectionBatchLoader` 合并同一请求内的读取。通过处理器的 `createLoaders` 为每个请求创建 loader，resolver 从 `loaders` 取得它。工厂必须每次创建新 loader，不要返回跨请求共享的实例。
 
 ```typescript
-import { createSelectionBatchLoader } from '@nexusmc-cn/axnexus/selection/server';
+import { createSelectionBatchLoader, withSelectionLoaders } from '@nexusmc-cn/axnexus/selection/server';
 
 // 将这个工厂传给 createSelectionHandler({ ..., createLoaders })。
 const createLoaders = ({ context, signal }: {
@@ -214,11 +214,16 @@ const createLoaders = ({ context, signal }: {
   ),
 });
 
+// 将工厂先绑定到实现器，让字段 resolver 的 loaders 自动推断类型：
+const scoped = withSelectionLoaders(createLoaders);
+// const server = scoped.implement(membersContract, { ...字段实现... });
+// const handler = createSelectionHandler({ resources: [server], createLoaders: scoped.createLoaders, limits });
+
 // 对应的字段 resolver：
 // accountName: { resolve: ({ parent, loaders }) => loaders.accounts.load(parent.accountId) }
 ```
 
-批量函数须按输入顺序返回等量结果。相同 key 在单次请求内可复用结果；不同请求各建一份 loader。数组条目的读取会并行触发，才能在一个批次中收集多个 key。
+批量函数须按输入顺序返回等量结果。相同 key 在单次请求内可复用结果；不同请求各建一份 loader。服务端先检查同一字段对所有条目的权限，再并行读取该字段，以便收集多个 key。
 
 ### 已注册的选择方案
 
