@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { connect, constants as http2Constants } from 'node:http2';
+import { setTimeout as delay } from 'node:timers/promises';
 import Fastify from 'fastify';
 import { defineSelectionResource, leaf } from '../../dist/selection/index.js';
 import { implementSelection } from '../../dist/selection/server/index.js';
@@ -18,6 +21,16 @@ const limits = { maxRequestBytes: 512, maxDepth: 2, maxFields: 2, maxCost: 2, ma
 const payload = (select: unknown = { id: true }) => JSON.stringify({
   protocol: 'axnexus.selection', version: 1, resource: contract.resource, args: { id: '42' }, select,
 });
+
+async function within<T>(promise: Promise<T>, label: string): Promise<T> {
+  const controller = new AbortController();
+  try {
+    return await Promise.race([
+      promise,
+      delay(5000, undefined, { signal: controller.signal }).then(() => { throw new Error(`${label} timed out`); }),
+    ]);
+  } finally { controller.abort(); }
+}
 
 test('Fastify plugin preserves prefix, hooks, auth, protocol errors and unrelated JSON routes', async () => {
   const app = Fastify();
@@ -192,4 +205,160 @@ test('explicit bodies require raw bytes and preserve matching multipart headers'
   assert.equal((await web.formData()).get('name'), 'Ada');
   assert.equal(web.headers.get('content-type'), 'multipart/form-data; boundary=original');
   assert.equal(web.headers.get('content-length'), null);
+});
+
+test('Web bridge signal follows the response lifetime on real POST connections', async () => {
+  const app = Fastify({ forceCloseConnections: true });
+  let started = () => {};
+  let observed = (_aborted: boolean) => {};
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
+  app.post('/bridge', async (request, reply) => {
+    const web = toWebRequest(request, { reply });
+    started();
+    await delay(100);
+    observed(web.signal.aborted);
+    return sendWebResponse(reply, new Response('ok'));
+  });
+  try {
+    const base = await app.listen({ host: '127.0.0.1', port: 0 });
+    const waitForObservation = () => {
+      const began = new Promise<void>((resolve) => { started = resolve; });
+      const result = new Promise<boolean>((resolve) => { observed = resolve; });
+      return { began, result };
+    };
+    const connected = waitForObservation();
+    const normal = await within(fetch(`${base}/bridge`, { method: 'POST',
+      headers: { 'content-type': 'application/json', connection: 'close' }, body: '{}' }), 'connected bridge request');
+    assert.equal(normal.status, 200);
+    assert.equal(await normal.text(), 'ok');
+    assert.equal(await within(connected.result, 'connected bridge observation'), false);
+
+    const disconnected = waitForObservation();
+    const controller = new AbortController();
+    const pending = fetch(`${base}/bridge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: controller.signal });
+    await within(disconnected.began, 'disconnected bridge start');
+    controller.abort();
+    await within(assert.rejects(pending, { name: 'AbortError' }), 'disconnected bridge fetch');
+    assert.equal(await within(disconnected.result, 'disconnected bridge observation'), true);
+  } finally { await app.close(); }
+});
+
+test('Fastify Selection resolver sees a real client disconnect', async () => {
+  const app = Fastify();
+  let began = () => {};
+  let observed = (_aborted: boolean) => {};
+  const resource = implementSelection(contract, { authorizeResource: () => true,
+    load: async ({ args: input, signal }) => {
+      began();
+      await delay(100);
+      observed(signal.aborted);
+      return { id: input.id };
+    },
+    fields: { id: { resolve: ({ parent }) => parent.id }, name: { resolve: () => 'Ada' } },
+  });
+  try {
+    await app.register(createFastifySelectionPlugin({ resources: [resource], limits, getContext: () => ({}) }));
+    const base = await app.listen({ host: '127.0.0.1', port: 0 });
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    const result = new Promise<boolean>((resolve) => { observed = resolve; });
+    const controller = new AbortController();
+    const pending = fetch(`${base}/__axnexus/select`, { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: payload(), signal: controller.signal });
+    await within(started, 'Selection resolver start');
+    controller.abort();
+    await within(assert.rejects(pending, { name: 'AbortError' }), 'Selection client abort');
+    assert.equal(await within(result, 'Selection abort observation'), true);
+  } finally { await app.close(); }
+});
+
+test('Fastify Selection accepts HTTP/2 pseudo-headers without forwarding them to Web Headers', async () => {
+  const app = Fastify({ http2: true });
+  const resource = implementSelection(contract, { authorizeResource: () => true,
+    load: ({ args: input, signal }) => {
+      assert.equal(signal.aborted, false);
+      return { id: input.id };
+    },
+    fields: { id: { resolve: ({ parent }) => parent.id }, name: { resolve: () => 'Ada' } },
+  });
+  let session: ReturnType<typeof connect> | undefined;
+  try {
+    await app.register(createFastifySelectionPlugin({ resources: [resource], limits, getContext: () => ({}) }));
+    const base = await app.listen({ host: '127.0.0.1', port: 0 });
+    session = connect(base);
+    const request = session.request({ ':method': 'POST', ':path': '/__axnexus/select', 'content-type': 'application/json' });
+    let status = 0;
+    const chunks: Buffer[] = [];
+    request.on('response', (headers) => { status = Number(headers[':status']); });
+    request.on('data', (chunk: Buffer) => { chunks.push(chunk); });
+    const ended = once(request, 'end');
+    request.end(payload());
+    await within(ended, 'HTTP/2 Selection response');
+    assert.equal(status, 200);
+    assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), { data: { id: '42' } });
+  } finally {
+    session?.destroy();
+    await app.close();
+  }
+});
+
+test('Fastify Selection aborts its resolver when an HTTP/2 stream is canceled', async () => {
+  const app = Fastify({ http2: true });
+  let began = () => {};
+  let observed = (_aborted: boolean) => {};
+  const resource = implementSelection(contract, { authorizeResource: () => true,
+    load: async ({ args: input, signal }) => {
+      began();
+      await delay(100);
+      observed(signal.aborted);
+      return { id: input.id };
+    },
+    fields: { id: { resolve: ({ parent }) => parent.id }, name: { resolve: () => 'Ada' } },
+  });
+  let session: ReturnType<typeof connect> | undefined;
+  try {
+    await app.register(createFastifySelectionPlugin({ resources: [resource], limits, getContext: () => ({}) }));
+    const base = await app.listen({ host: '127.0.0.1', port: 0 });
+    session = connect(base);
+    const request = session.request({ ':method': 'POST', ':path': '/__axnexus/select', 'content-type': 'application/json' });
+    request.on('error', () => {});
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    const result = new Promise<boolean>((resolve) => { observed = resolve; });
+    request.end(payload());
+    await within(started, 'HTTP/2 Selection resolver start');
+    request.close(http2Constants.NGHTTP2_CANCEL);
+    assert.equal(await within(result, 'HTTP/2 Selection abort observation'), true);
+  } finally {
+    session?.destroy();
+    await app.close();
+  }
+});
+
+test('HTTP/2 cancellation before an async bridge still produces an aborted Web signal', async () => {
+  const app = Fastify({ http2: true });
+  let began = () => {};
+  let observed = (_aborted: boolean) => {};
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
+  app.post('/bridge', async (request, reply) => {
+    began();
+    await delay(100);
+    const web = toWebRequest(request, { reply });
+    observed(web.signal.aborted);
+    return sendWebResponse(reply, new Response('ok'));
+  });
+  let session: ReturnType<typeof connect> | undefined;
+  try {
+    const base = await app.listen({ host: '127.0.0.1', port: 0 });
+    session = connect(base);
+    const request = session.request({ ':method': 'POST', ':path': '/bridge', 'content-type': 'application/json' });
+    request.on('error', () => {});
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    const result = new Promise<boolean>((resolve) => { observed = resolve; });
+    request.end('{}');
+    await within(started, 'HTTP/2 bridge start');
+    request.close(http2Constants.NGHTTP2_CANCEL);
+    assert.equal(await within(result, 'HTTP/2 delayed bridge observation'), true);
+  } finally {
+    session?.destroy();
+    await app.close();
+  }
 });

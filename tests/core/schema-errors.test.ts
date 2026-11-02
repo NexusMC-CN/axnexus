@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createHttpClient } from '../../dist/core/client.js';
 import { HttpError, isHttpError, toError, responseInterceptorError } from '../../dist/core/errors.js';
@@ -7,6 +8,17 @@ import { fetchJsonResult } from '../../dist/server/json.js';
 
 const config = { url: '/duplicate', method: 'GET', headers: new Headers() };
 const otherErrors = await import(new URL('../../dist/core/errors.js?duplicate-core-test', import.meta.url).href);
+
+test('error registries use the current package version', () => {
+  const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  const registry = globalThis as typeof globalThis & { [key: symbol]: unknown };
+  const httpPrototypes = registry[Symbol.for(`@nexusmc-cn/axnexus@${version}/HttpError/prototypes`)];
+  const schemaPrototypes = registry[Symbol.for(`@nexusmc-cn/axnexus@${version}/SchemaValidationError/prototypes`)];
+  assert.ok(httpPrototypes instanceof WeakSet);
+  assert.ok(schemaPrototypes instanceof WeakSet);
+  assert.equal(httpPrototypes.has(HttpError.prototype), true);
+  assert.equal(schemaPrototypes.has(schemaModule.SchemaValidationError.prototype), true);
+});
 
 test('same-version duplicate HttpError modules preserve classification through normalization and interceptors', () => {
   const raw = new Response('');

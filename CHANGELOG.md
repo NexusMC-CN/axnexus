@@ -1,6 +1,6 @@
 # 变更记录
 
-## 未发布
+## 0.4.0 · 2026-11-02
 
 ### 新增
 
@@ -11,6 +11,13 @@
 - `describeSelectionResource`、`inspectSelection` 和处理器 `observe` 钩子：查看公开字段、预算与不含请求参数或响应值的执行元数据。
 - 可选 `./fastify` 入口：注册独立的 Selection POST 路由，并提供逐路由的 Web Request/Response 桥接；Fastify 5 为可选 peer，不接管现有 REST、上传或流式路由。
 - Selection 服务端处理器支持配置 `endpoint`，与 Fastify 路由前缀配合使用。
+
+### 修复
+
+- Fastify Web 桥接使用响应连接和 HTTP/2 请求流状态追踪客户端断开，避免正常 POST 被提前取消或断开后 Selection 解析器未收到取消信号。
+- Fastify HTTP/2 桥接跳过伪首部，避免合法请求在构造 Web `Headers` 时变成 500。
+- 更新 `HttpError` 与 `SchemaValidationError` 的版本隔离键，避免 0.4.0 与 0.3.0 模块错误类互相识别。
+- 发布包包含 `src`，使 JavaScript 和声明文件的源码映射可定位到实际源文件；Fastify 开发依赖及可选 peer 下限更新至已修复安全公告的 5.12.8。
 
 ### 文档
 

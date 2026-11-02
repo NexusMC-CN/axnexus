@@ -281,10 +281,10 @@ console.log(description.resource, inspected.metrics);
 
 ### Fastify 服务端集成
 
-普通 axnexus HTTP 客户端可以直接调用 Fastify 的现有 REST 路由，无需插件。若服务端要提供 Selection，可选装 Fastify 5（`>=5.7.3 <6`），从独立入口挂载 Selection POST 路由。`/fastify` 不由根入口加载。
+普通 axnexus HTTP 客户端可以直接调用 Fastify 的现有 REST 路由，无需插件。若服务端要提供 Selection，可选装 Fastify 5（`>=5.12.8 <6`），从独立入口挂载 Selection POST 路由。`/fastify` 不由根入口加载。
 
 ```bash
-pnpm add fastify@^5.7.3
+pnpm add fastify@^5.12.8
 ```
 
 沿用上文的 `server` 资源实现和 `limits`，在服务端注册：
@@ -317,12 +317,12 @@ import { sendWebResponse, toWebRequest } from '@nexusmc-cn/axnexus/fastify';
 declare function webStatusHandler(request: Request): Promise<Response>;
 
 app.get('/status', async (request, reply) => {
-  const response = await webStatusHandler(toWebRequest(request));
+  const response = await webStatusHandler(toWebRequest(request, { reply }));
   return sendWebResponse(reply, response);
 });
 ```
 
-`toWebRequest` 保留方法、路径、请求头和取消信号；`sendWebResponse` 传递状态、响应头、多个 `Set-Cookie` 与响应流。`toWebRequest` 不把 Fastify 已解析的 JSON 或 multipart 对象重新序列化。桥接带请求体的路由时，应配置原始字节解析器，或显式传入 `toWebRequest(request, { body: rawBytes })`；显式 `body` 只接受文本、字节或 Web 流，不接受已构造的 `FormData`、`URLSearchParams`、`Blob`。multipart 路由要传入原始请求字节及匹配的 `Content-Type`。需要覆盖来源或内部路径时，分别设置 `origin`、`path`。
+`toWebRequest` 保留方法、路径和请求头；传入当前 `reply` 时，响应未完成而客户端断开会取消 Web `Request.signal`。不传 `reply` 的请求不追踪连接取消。`sendWebResponse` 传递状态、响应头、多个 `Set-Cookie` 与响应流。`toWebRequest` 不把 Fastify 已解析的 JSON 或 multipart 对象重新序列化。桥接带请求体的路由时，应配置原始字节解析器，或显式传入 `toWebRequest(request, { reply, body: rawBytes })`；显式 `body` 只接受文本、字节或 Web 流，不接受已构造的 `FormData`、`URLSearchParams`、`Blob`。multipart 路由要传入原始请求字节及匹配的 `Content-Type`。需要覆盖来源或内部路径时，分别设置 `origin`、`path`。
 
 ### Nuxt 4 与 Nitro
 
@@ -344,7 +344,7 @@ export default defineEventHandler(async (event) =>
   handler(event.req, { principal: await authenticate(event.req) }));
 ```
 
-**Nuxt 4.5：** 同一路由用 H3 v1 转换请求和响应；`toWebRequest` 在 H3 v1 中仍标注为不稳定，因此建议固定已验证的 Nuxt/H3 版本：
+**Nuxt 4.5：** 同一路由用 H3 v1 转换请求和响应。示例直接导入 `h3`，使用 pnpm 的应用应显式安装 `h3@1.15.11`（消费测试所用版本）；`toWebRequest` 在 H3 v1 中仍标注为不稳定，因此建议固定已验证的 Nuxt/H3 版本：
 
 ```typescript
 import { defineEventHandler, sendWebResponse, toWebRequest } from 'h3';

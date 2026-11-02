@@ -15,11 +15,49 @@ export interface FastifyWebRequestOptions {
   readonly path?: string;
   /** Supply raw bytes, text, or a Web stream when a Fastify parser has consumed the body. */
   readonly body?: string | Uint8Array | ArrayBuffer | ReadableStream<Uint8Array> | null;
+  /** Track client disconnects until the Fastify response finishes. */
+  readonly reply?: FastifyReply;
 }
 
 function rawBody(value: unknown): value is string | Uint8Array | ArrayBuffer | ReadableStream<Uint8Array> {
   return typeof value === 'string' || value instanceof Uint8Array || value instanceof ArrayBuffer
     || value instanceof ReadableStream;
+}
+
+function responseAbortSignal(request: FastifyRequest, reply: FastifyReply): AbortSignal {
+  const incoming = request.raw;
+  const response = reply.raw;
+  const controller = new AbortController();
+  if (incoming.aborted) {
+    controller.abort();
+    return controller.signal;
+  }
+  if (response.writableFinished) return controller.signal;
+  if (response.destroyed) {
+    controller.abort();
+    return controller.signal;
+  }
+  const cleanup = () => {
+    incoming.off('aborted', onAbort);
+    response.off('finish', onFinish);
+    response.off('close', onClose);
+  };
+  const onAbort = () => {
+    controller.abort();
+    cleanup();
+  };
+  const onFinish = () => {
+    if (incoming.aborted) controller.abort();
+    cleanup();
+  };
+  const onClose = () => {
+    if (!response.writableFinished || incoming.aborted) controller.abort();
+    cleanup();
+  };
+  incoming.once('aborted', onAbort);
+  response.once('finish', onFinish);
+  response.once('close', onClose);
+  return controller.signal;
 }
 
 /** Adapt one Fastify request without silently reserializing parsed JSON or multipart data. */
@@ -32,7 +70,10 @@ export function toWebRequest(request: FastifyRequest, options: FastifyWebRequest
   if (url.origin !== origin.origin) throw new TypeError('Web request path must stay on its origin');
   const headers = new Headers();
   const rawHeaders = request.raw.rawHeaders;
-  for (let index = 0; index < rawHeaders.length; index += 2) headers.append(rawHeaders[index]!, rawHeaders[index + 1]!);
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index]!;
+    if (!name.startsWith(':')) headers.append(name, rawHeaders[index + 1]!);
+  }
   const supplied = Object.hasOwn(options, 'body');
   const body = supplied ? options.body : request.body;
   if (body !== undefined && body !== null && !rawBody(body)) {
@@ -41,7 +82,8 @@ export function toWebRequest(request: FastifyRequest, options: FastifyWebRequest
   if (supplied) headers.delete('content-length');
   const method = request.method.toUpperCase();
   if ((method === 'GET' || method === 'HEAD') && body != null) throw new TypeError('GET and HEAD requests cannot have a body');
-  const init: RequestInit & { duplex?: 'half' } = { method, headers, signal: request.signal };
+  const init: RequestInit & { duplex?: 'half' } = { method, headers };
+  if (options.reply) init.signal = responseAbortSignal(request, options.reply);
   if (body != null) {
     init.body = body as BodyInit;
     if (body instanceof ReadableStream) init.duplex = 'half';
@@ -107,7 +149,7 @@ export function createFastifySelectionPlugin<Context, Loaders = unknown>(
       },
     }, async (request, reply) => {
       const context = await options.getContext(request, reply);
-      const webRequest = toWebRequest(request, { path: endpoint });
+      const webRequest = toWebRequest(request, { path: endpoint, reply });
       return sendWebResponse(reply, await handler(webRequest, context));
     });
   };

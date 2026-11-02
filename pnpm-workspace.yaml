@@ -1,0 +1,3 @@
+# The new Fastify security patch fixes GHSA-3qgw-9275-xf8w.
+minimumReleaseAgeExclude:
+  - fastify@5.12.8
