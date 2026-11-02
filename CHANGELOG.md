@@ -9,10 +9,12 @@
 - 请求内批量加载器 `createSelectionBatchLoader` 与 `withSelectionLoaders`：按请求创建、去重、分批读取，并在列表字段权限检查后并行执行。
 - 版本化已注册选择方案 `defineSelectionPlan`：服务端启动时校验，客户端按方案 ID 执行；可关闭动态选择。
 - `describeSelectionResource`、`inspectSelection` 和处理器 `observe` 钩子：查看公开字段、预算与不含请求参数或响应值的执行元数据。
+- 可选 `./fastify` 入口：注册独立的 Selection POST 路由，并提供逐路由的 Web Request/Response 桥接；Fastify 5 为可选 peer，不接管现有 REST、上传或流式路由。
+- Selection 服务端处理器支持配置 `endpoint`，与 Fastify 路由前缀配合使用。
 
 ### 文档
 
-- 重设计 README 的任务导航、快速开始及 Selection 四项扩展示例。
+- 重设计 README 的任务导航、快速开始、Selection 四项扩展示例及 Fastify 接入说明。
 
 ## 0.3.0 · 2026-10-28
 

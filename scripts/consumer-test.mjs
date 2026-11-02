@@ -31,7 +31,8 @@ try {
   await access(tarball);
   assert(packed.files.some(file => file.path === 'dist/stream/index.js'));
   for (const entry of ['dist/selection/index.js', 'dist/selection/index.d.ts',
-    'dist/selection/server/index.js', 'dist/selection/server/index.d.ts']) {
+    'dist/selection/server/index.js', 'dist/selection/server/index.d.ts',
+    'dist/integrations/fastify.js', 'dist/integrations/fastify.d.ts']) {
     assert(packed.files.some(file => file.path === entry), `Missing selection tarball entry: ${entry}`);
   }
   assert(!packed.files.some(file => /^(?:docs|tests|scripts)\//.test(file.path)));
@@ -44,7 +45,7 @@ try {
   };
   await install();
   const requireFromPackage = createRequire(await realpath(join(temporary, 'node_modules', packageName, 'package.json')));
-  for (const dependency of ['@opentelemetry/api', '@tanstack/query-core', '@orpc/client']) {
+  for (const dependency of ['@opentelemetry/api', '@tanstack/query-core', '@orpc/client', 'fastify']) {
     await assert.rejects(access(join(temporary, 'node_modules', dependency)));
     assert.throws(() => requireFromPackage.resolve(dependency), { code: 'MODULE_NOT_FOUND' });
   }
@@ -77,6 +78,7 @@ await client.close();`;
     .replaceAll('../../src/selection/plans.js', `${packageName}/selection`)
     .replaceAll('../../src/selection/server/batch-loader.js', `${packageName}/selection/server`)
     .replaceAll('../../src/selection/server/index.js', `${packageName}/selection/server`)
+    .replaceAll('../../src/integrations/fastify.js', `${packageName}/fastify`)
     .replaceAll('../../src/bridges/index.js', `${packageName}/fetch`)
     .replaceAll('../../src/stream/index.js', `${packageName}/stream`)
     .replaceAll('../../src/plugins/index.js', `${packageName}/plugins`)
@@ -95,12 +97,16 @@ await client.close();`;
   await check();
   manifest.dependencies['@opentelemetry/api'] = '1.9.0';
   manifest.dependencies['@tanstack/query-core'] = '5.104.5';
+  manifest.dependencies.fastify = '5.12.5';
+  manifest.devDependencies = { '@types/node': '22.20.5' };
   await install();
   await writeFile(join(temporary, 'types', 'integrations.ts'), rewrite(await readFile(join(root, 'tests/types/integrations.ts'), 'utf8')));
+  await writeFile(join(temporary, 'types', 'fastify.ts'), rewrite(await readFile(join(root, 'tests/types/fastify.ts'), 'utf8')));
   await check();
   await writeFile(join(temporary, 'optional.mjs'), `import {createOpenTelemetryPlugin} from '${packageName}/opentelemetry';
 import {createQueryOptions} from '${packageName}/tanstack-query';
-if(typeof createOpenTelemetryPlugin !== 'function' || typeof createQueryOptions !== 'function') throw new Error('Optional export failed');`);
+import {createFastifySelectionPlugin,toWebRequest,sendWebResponse} from '${packageName}/fastify';
+if([createOpenTelemetryPlugin,createQueryOptions,createFastifySelectionPlugin,toWebRequest,sendWebResponse].some(value => typeof value !== 'function')) throw new Error('Optional export failed');`);
   run(join(temporary, 'optional.mjs'), []);
   console.log('Tarball consumer passed: core without peers, optional entries, NodeNext and Bundler types.');
 } finally {
