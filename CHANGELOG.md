@@ -1,5 +1,19 @@
 # 变更记录
 
+## 未发布
+
+### 新增
+
+- 可选的独立 Selection 协议：类型化共享字段契约、精确字段响应、逐字段授权及请求预算。
+- 资源级游标分页辅助函数 `paginateSelection`：限制页长与游标长度，以额外一条记录判断下一页。
+- 请求内批量加载器 `createSelectionBatchLoader` 与 `withSelectionLoaders`：按请求创建、去重、分批读取，并在列表字段权限检查后并行执行。
+- 版本化已注册选择方案 `defineSelectionPlan`：服务端启动时校验，客户端按方案 ID 执行；可关闭动态选择。
+- `describeSelectionResource`、`inspectSelection` 和处理器 `observe` 钩子：查看公开字段、预算与不含请求参数或响应值的执行元数据。
+
+### 文档
+
+- 重设计 README 的任务导航、快速开始及 Selection 四项扩展示例。
+
 ## 0.3.0 · 2026-10-28
 
 ### 新增

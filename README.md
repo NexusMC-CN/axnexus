@@ -1,25 +1,27 @@
 # axnexus
 
-一个基于原生 Fetch/XHR 的 TypeScript HTTP 客户端，提供 Axios 风格的实例 API、大小写不敏感 headers、进度捕捉、限速调度、超时取消、重试和 GET 缓存。
+基于原生 Fetch/XHR 的 TypeScript HTTP 客户端。日常请求使用熟悉的实例 API；需要按需返回字段时，可以选择独立的 **axnexus Selection** JSON 协议。两者共用 HTTP 传输，但 Selection 不要求 GraphQL 服务、查询语言或运行时依赖。
 
-## 特性
+## 从这里开始
 
-- 核心零运行时依赖，面向现代浏览器、Node.js 18+ 和提供标准 Web API 的 Bun 运行环境。
-- 提供 `get`、`head`、`options`、`trace`、`connect`、`post`、`put`、`patch`、`delete` 和通用 `request` 方法。
-- 自动处理 JSON、文本、`Blob`、`ArrayBuffer`、`FormData` 和 `Response`。
-- 支持请求/响应拦截器、请求 ID、超时、`AbortSignal` 和可配置重试。
-- 支持结构化重试策略、`Retry-After`、退避抖动、总超时、状态校验和 JSON 转换钩子。
-- 支持 GET 响应 TTL 缓存和并发请求去重。
-- 提供可独立使用的 stale-while-revalidate 响应缓存和 SSR/middleware `fetchJson`。
-- `AxiosHeaders` 支持大小写不敏感读写、规范化、合并、迭代和 method shortcut。
-- Fetch 下载进度、XHR 上传进度、响应大小限制和完整 response metadata。
-- 提供有界并发分块上传编排器，可接入自定义上传协议。
-- 按客户端/资源组调度的并发、优先级、请求频率和队列超时限制。
-- 提供请求生命周期日志适配器，默认脱敏 Cookie 和 Authorization 等敏感请求头。
-- 可选 Node HTTP/2 adapter，以及只通过注入 transport 启用的 HTTP/3 adapter。
-- CSRF 通过显式拦截器接入，不修改全局 `fetch`，不读取页面 Cookie。
-- Standard Schema 输入/输出类型推导、结构化校验错误，以及 SSE/NDJSON、Fetch 桥接和轻量端点契约。
-- 类型化本地 context、客户端插件、自动日志，以及可选 OpenTelemetry 和 TanStack Query 集成。
+| 你要做什么 | 先看哪里 |
+| --- | --- |
+| 发送 HTTP 请求 | [安装](#安装)、[HTTP 快速开始](#http-快速开始)、[请求配置](#请求配置) |
+| 为 API 按需选字段 | [Selection 选择协议](#selection-选择协议)、[有界分页](#有界分页)、[批量加载](#请求内批量加载)、[注册方案](#已注册的选择方案) |
+| 处理生产环境的可靠性和性能 | [错误处理](#错误处理)、[重试](#重试)、[GET 缓存](#get-缓存)、[进度和限速](#进度和限速) |
+| 接入现有服务和生态 | [SSR 和一次性 JSON 请求](#ssr-和一次性-json-请求)、[端点契约](#端点契约)、[Fetch 桥接与 oRPC](#fetch-桥接与-orpc) |
+| 观察请求行为 | [Selection 开发工具与观测](#开发工具与观测)、[HTTP 请求观测](#请求观测)、[OpenTelemetry](#opentelemetry) |
+
+## 能力地图
+
+| 范围 | 能力 |
+| --- | --- |
+| HTTP 核心 | Axios 风格实例与 `AxiosHeaders`；JSON、文本、`Blob`、`ArrayBuffer`、`FormData`、`Response`；超时、取消、拦截器、状态和转换钩子 |
+| 网络控制 | 结构化重试与 `Retry-After`、GET TTL 缓存和请求去重、下载/上传进度、响应大小限制、并发/频率调度、分块上传 |
+| 服务与生态 | SSR `fetchJson`、SSE/NDJSON、端点契约、Fetch 桥接、可选 Node HTTP/2 与注入式 HTTP/3、TanStack Query |
+| Selection（可选） | 类型化字段契约、逐字段授权、查询预算、按需执行；分页、请求内批量加载、注册选择方案及观测扩展见下文 |
+
+核心零运行时依赖，支持现代浏览器、Node.js 18+ 和提供标准 Web API 的 Bun。可选集成按入口导入；根入口不加载 Node 传输或可选的生态依赖。
 
 ## 安装
 
@@ -37,15 +39,17 @@ pnpm add @nexusmc-cn/axnexus
 | `@nexusmc-cn/axnexus/stream` | [SSE/NDJSON 消费与 SSE 重连](#sse-和-ndjson) |
 | `@nexusmc-cn/axnexus/fetch` | [为 oRPC 等 SDK 提供 Fetch](#fetch-桥接与-orpc) |
 | `@nexusmc-cn/axnexus/contracts` | [端点契约与业务错误](#端点契约) |
+| `@nexusmc-cn/axnexus/selection` | [共享字段契约与选择客户端](#selection-选择协议) |
+| `@nexusmc-cn/axnexus/selection/server` | [Selection 服务端处理器](#selection-选择协议) |
 | `@nexusmc-cn/axnexus/plugins` | [插件和生命周期事件类型](#context-和插件) |
 | `@nexusmc-cn/axnexus/observability` | [请求日志及自动接入](#请求观测) |
 | `@nexusmc-cn/axnexus/opentelemetry` | [可选 OpenTelemetry 插件](#opentelemetry) |
 | `@nexusmc-cn/axnexus/tanstack-query` | [可选 TanStack Query options](#tanstack-query) |
 | `@nexusmc-cn/axnexus/node-http2`、`@nexusmc-cn/axnexus/node-http3` | [Node 传输](#http2-和-http3) |
 
-根入口不加载 Node 传输或可选集成依赖。只在使用 OpenTelemetry、TanStack Query 或 oRPC 时安装相应依赖，见各节说明。
+只在使用 OpenTelemetry、TanStack Query 或 oRPC 时安装相应依赖，见各节说明。
 
-## 快速开始
+## HTTP 快速开始
 
 ```typescript
 import { createHttpClient } from '@nexusmc-cn/axnexus';
@@ -69,6 +73,210 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 跨源鉴权需要显式设置 `credentials: 'include'`，服务端须正确配置 CORS 和 `Access-Control-Allow-Credentials`。公开 API 可设置 `credentials: 'omit'`。升级到 `0.2.0` 时，依赖跨源 Cookie 或自动请求 ID 的调用方需要显式开启相应选项；其他兼容性变化见[变更记录](./CHANGELOG.md)。
 
 `trace` 和 `connect` 便捷方法保留给支持相应方法的自定义 adapter。内置 Fetch（包括 Node Fetch）和 XHR 会在发送前抛出 `ERR_UNSUPPORTED_METHOD`，不会把它们当作网络故障重试。
+
+## Selection 选择协议
+
+Selection 是 axnexus 自有的可选 JSON 协议。客户端声明需要的字段，服务端按字段授权并执行；它不使用 GraphQL 查询语言。共享契约只放公开字段形状，服务端 resolver 和权限函数仅从 `/selection/server` 引入。部署时仍需配置同源/跨源访问、认证和 CSRF 策略。
+
+如果一个端点的响应形状固定，继续使用普通 HTTP 请求或 [端点契约](#端点契约)。如果多个页面需要同一资源的不同字段组合，使用 Selection；业务身份与权限仍由服务端决定。
+
+### 共享契约与客户端
+
+先定义资源参数和公开字段，客户端用 `select` 调用。同一个资源可供多个选择形状复用。
+
+`users-contract.ts` 只包含可以共享的资源定义：
+
+```typescript
+import { defineSelectionResource, leaf } from '@nexusmc-cn/axnexus/selection';
+
+const stringSchema = { '~standard': { validate(value: unknown) {
+  return typeof value === 'string' ? { value } : { issues: [{ message: 'Expected string' }] };
+} } };
+const argsSchema = { '~standard': { validate(value: unknown) {
+  return value && typeof value === 'object' && 'id' in value && typeof value.id === 'string'
+    ? { value: { id: value.id } } : { issues: [{ message: 'Expected id' }] };
+} } };
+export const users = defineSelectionResource({
+  resource: 'users.byId.v1', args: argsSchema, nullable: true,
+  fields: { id: leaf(stringSchema), name: leaf(stringSchema) },
+});
+```
+
+调用方再创建客户端：
+
+```typescript
+import { createHttpClient } from '@nexusmc-cn/axnexus';
+import { createSelectionClient } from '@nexusmc-cn/axnexus/selection';
+import { users } from './users-contract.js';
+
+const http = createHttpClient({ baseURL: 'https://api.example.com' });
+const selection = createSelectionClient(http, { endpoint: '/__axnexus/select' });
+const user = await selection.select(users, {
+  args: { id: '42' }, select: { id: true, name: true } as const,
+});
+// user: { id: string; name: string } | null
+```
+
+这次选择对应的 JSON 请求为：
+
+```json
+{
+  "protocol": "axnexus.selection",
+  "version": 1,
+  "resource": "users.byId.v1",
+  "args": { "id": "42" },
+  "select": { "id": true, "name": true }
+}
+```
+
+### 服务端执行
+
+服务端从独立模块导入共享契约，定义根加载器、字段读取和授权，再挂载 POST 路由：
+
+```typescript
+import { createSelectionHandler, implementSelection } from '@nexusmc-cn/axnexus/selection/server';
+import { users } from './users-contract.js';
+
+declare function readUserName(id: string): Promise<string>;
+const server = implementSelection(users, {
+  authorizeResource: ({ context }) => Boolean(context),
+  load: async ({ args }) => ({ id: args.id }), // 只载入字段授权所需的最小身份数据
+  fields: {
+    id: { resolve: ({ parent }) => parent.id },
+    name: { resolve: async ({ parent }) => readUserName(parent.id) },
+  },
+});
+const limits = {
+  maxRequestBytes: 8192, maxDepth: 4, maxFields: 20, maxCost: 100, maxArrayLength: 50,
+};
+const handler = createSelectionHandler({ resources: [server], limits });
+// 框架路由 POST /__axnexus/select：return handler(request, authenticatedContext);
+```
+
+### 协议与安全边界
+
+协议使用 POST；成功体为 `{ data }`，失败体为 `{ error: { code, message } }`。一次请求选择一个资源，只读且无部分成功。服务端返回 `Cache-Control: no-store`。静态选择可精确推导返回字段，动态选择只得到保守的可选字段类型。资源和字段权限必须在相应读取前检查；根加载器不接收选择树，避免预读未授权字段。
+
+若叶子 schema 会把 resolver 值转换成另一种 JSON 形态，给 `leaf(schema, { wireSchema })` 配置校验转换后值的 schema；客户端用它校验服务器返回值。普通只校验、不转换的字段可省略。
+
+| 服务端限制 | 控制什么 |
+| --- | --- |
+| `maxRequestBytes` | JSON 请求体大小，读取时即停止超限请求 |
+| `maxDepth`、`maxFields` | 选择树的层数与字段数量 |
+| `maxCost` | 按字段成本和数组上限估算的最坏情况预算 |
+| `maxArrayLength` | 数组最多可返回的条目数，也参与成本估算 |
+
+请求体与选择树预算在资源读取前检查；实际数组长度在字段返回时再次检查。业务字段的 `cost` 可以在共享契约中显式配置。
+
+### 有界分页
+
+列表资源通过资源参数接收 `first` 和 `after`。服务端用 `paginateSelection` 限制页大小、转换不透明游标并读取数据；客户端继续对返回的条目和分页元信息按需选字段。页大小上限由服务端配置，不信任客户端提交的 `first`。
+
+```typescript
+import { paginateSelection } from '@nexusmc-cn/axnexus/selection/server';
+
+declare function decodeUserCursor(value: string): string;
+declare function encodeUserCursor(id: string): string;
+declare const userStore: {
+  listAfterId(input: { after: string | null; limit: number; signal?: AbortSignal }):
+    Promise<readonly { id: string }[]>;
+};
+
+// 由资源的 load 调用；游标和稳定排序由业务数据源实现。
+const loadPage = (args: { first: number; after?: string }, signal: AbortSignal) =>
+  paginateSelection(args, {
+    maxPageSize: 50,
+    decodeCursor: decodeUserCursor,
+    encodeCursor: (row) => encodeUserCursor(row.id),
+    load: ({ after, limit, signal }) => userStore.listAfterId({ after, limit, signal }),
+    signal,
+  });
+// loadPage 的结果是 { items, pageInfo: { endCursor, hasNextPage } }。
+```
+
+辅助函数向 `load` 传入 `limit = first + 1`，并拒绝超量结果；额外一条用于判断 `hasNextPage`。游标必须对应稳定且唯一的排序键，数据源须按同一顺序查询。将 `items` 和 `pageInfo` 定义为资源公开字段，`maxArrayLength` 至少应覆盖允许的最大页长。返回结构不包含总数。
+
+### 请求内批量加载
+
+当列表中的多个条目需要读取关联数据时，使用 `createSelectionBatchLoader` 合并同一请求内的读取。通过处理器的 `createLoaders` 为每个请求创建 loader，resolver 从 `loaders` 取得它。工厂必须每次创建新 loader，不要返回跨请求共享的实例。
+
+```typescript
+import { createSelectionBatchLoader, withSelectionLoaders } from '@nexusmc-cn/axnexus/selection/server';
+
+// 将这个工厂传给 createSelectionHandler({ ..., createLoaders })。
+const createLoaders = ({ context, signal }: {
+  context: { accounts: { namesByIds(ids: readonly string[]): Promise<readonly string[]> } };
+  signal: AbortSignal;
+}) => ({
+  accounts: createSelectionBatchLoader<string, string>(
+    (ids) => context.accounts.namesByIds(ids),
+    { signal, maxBatchSize: 50 },
+  ),
+});
+
+// 将工厂先绑定到实现器，让字段 resolver 的 loaders 自动推断类型：
+const scoped = withSelectionLoaders(createLoaders);
+// const server = scoped.implement(membersContract, { ...字段实现... });
+// const handler = createSelectionHandler({ resources: [server], createLoaders: scoped.createLoaders, limits });
+
+// 对应的字段 resolver：
+// accountName: { resolve: ({ parent, loaders }) => loaders.accounts.load(parent.accountId) }
+```
+
+批量函数须按输入顺序返回等量结果。相同 key 在单次请求内可复用结果；不同请求各建一份 loader。服务端先检查同一字段对所有条目的权限，再并行读取该字段，以便收集多个 key。
+
+### 已注册的选择方案
+
+固定页面或客户端可先用 `defineSelectionPlan` 给选择树命名，再通过客户端的 `execute` 按方案 ID 请求。服务端注册并校验这些方案；可以把动态选择留给需要它的调用方，同时为已知页面提供稳定的字段范围。方案 ID 必须带版本，以便字段调整时明确升级。
+
+共享的 `users-plan.ts`：
+
+```typescript
+import { defineSelectionPlan } from '@nexusmc-cn/axnexus/selection';
+import { users } from './users-contract.js';
+
+export const userSummary = defineSelectionPlan('users.summary.v1', users, {
+  id: true,
+  name: true,
+});
+```
+
+客户端调用：
+
+```typescript
+import { userSummary } from './users-plan.js';
+
+const user = await selection.execute(userSummary, { args: { id: '42' } });
+```
+
+`execute` 的请求体只发送方案 ID 和参数，服务端按已注册选择树执行。客户端和服务端应导入同一个方案定义。服务端用 `plans: [userSummary]` 注册；设置 `allowDynamic: false` 后只接受已注册方案，未注册 ID 返回 `UNKNOWN_PLAN`，普通动态选择请求返回 `DYNAMIC_SELECTION_DISABLED`：
+
+```typescript
+import { userSummary } from './users-plan.js';
+
+const planOnlyHandler = createSelectionHandler({
+  resources: [server],
+  plans: [userSummary],
+  allowDynamic: false,
+  limits,
+});
+```
+
+### 开发工具与观测
+
+`describeSelectionResource` 展示资源公开字段结构；`inspectSelection` 在发送前检查选择的结构与预算。处理器的 `observe` 钩子记录请求结果和执行统计，用于发现过深或代价过高的选择。
+
+```typescript
+import { describeSelectionResource, inspectSelection } from '@nexusmc-cn/axnexus/selection';
+
+const description = describeSelectionResource(users);
+const inspected = inspectSelection(users, { id: true, name: true }, {
+  maxDepth: 4, maxFields: 20, maxCost: 100, maxArrayLength: 50,
+});
+console.log(description.resource, inspected.metrics);
+```
+
+`inspected.metrics` 包含 `fieldCount`、`depth`、`cost` 和字段 `paths`。在处理器中设置 `observe: (event) => logger.info(event)` 可记录请求模式（`dynamic`、`registered` 或 `invalid`）、状态、耗时、请求字节数与预算等元数据。回调不应记录资源参数、响应值或用户身份；观测回调失败不会改变协议响应。
 
 ## Headers
 
