@@ -17,4 +17,6 @@ app.register(createFastifySelectionPlugin({ resources: [resource],
 declare const request: FastifyRequest;
 declare const reply: FastifyReply;
 toWebRequest(request, { origin: 'https://example.test', body: 'raw JSON' }) satisfies Request;
+// @ts-expect-error Generated multipart bodies must be supplied as original raw bytes.
+toWebRequest(request, { body: new FormData() });
 sendWebResponse(reply, new Response('ok')) satisfies FastifyReply;

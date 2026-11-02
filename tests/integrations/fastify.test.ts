@@ -178,15 +178,18 @@ test('host error handler remains authoritative for context failures', async () =
   } finally { await app.close(); }
 });
 
-test('explicit generated bodies replace stale content type boundaries', async () => {
+test('explicit bodies require raw bytes and preserve matching multipart headers', async () => {
   const request = { method: 'POST', raw: { url: '/upload', rawHeaders: [
     'content-type', 'multipart/form-data; boundary=original', 'content-length', '10',
   ] }, body: {}, signal: new AbortController().signal } as never;
   const form = new FormData();
   form.set('name', 'Ada');
-  const web = toWebRequest(request, { body: form });
+  assert.throws(() => toWebRequest(request, { body: form as never }), TypeError);
+  assert.throws(() => toWebRequest(request, { body: new URLSearchParams('name=Ada') as never }), TypeError);
+  assert.throws(() => toWebRequest(request, { body: new Blob(['Ada']) as never }), TypeError);
+  const raw = new TextEncoder().encode('--original\r\nContent-Disposition: form-data; name="name"\r\n\r\nAda\r\n--original--\r\n');
+  const web = toWebRequest(request, { body: raw });
   assert.equal((await web.formData()).get('name'), 'Ada');
-  assert.match(web.headers.get('content-type') ?? '', /multipart\/form-data; boundary=/);
-  assert.notEqual(web.headers.get('content-type'), 'multipart/form-data; boundary=original');
+  assert.equal(web.headers.get('content-type'), 'multipart/form-data; boundary=original');
   assert.equal(web.headers.get('content-length'), null);
 });

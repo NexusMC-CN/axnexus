@@ -322,7 +322,7 @@ app.get('/status', async (request, reply) => {
 });
 ```
 
-`toWebRequest` 保留方法、路径、请求头和取消信号；`sendWebResponse` 传递状态、响应头、多个 `Set-Cookie` 与响应流。`toWebRequest` 不把 Fastify 已解析的 JSON 或 multipart 对象重新序列化。桥接带请求体的路由时，应配置原始字节解析器，或显式传入 `toWebRequest(request, { body: rawBytes })`；不应把已解析对象当作原始请求体。需要覆盖来源或内部路径时，分别设置 `origin`、`path`。
+`toWebRequest` 保留方法、路径、请求头和取消信号；`sendWebResponse` 传递状态、响应头、多个 `Set-Cookie` 与响应流。`toWebRequest` 不把 Fastify 已解析的 JSON 或 multipart 对象重新序列化。桥接带请求体的路由时，应配置原始字节解析器，或显式传入 `toWebRequest(request, { body: rawBytes })`；显式 `body` 只接受文本、字节或 Web 流，不接受已构造的 `FormData`、`URLSearchParams`、`Blob`。multipart 路由要传入原始请求字节及匹配的 `Content-Type`。需要覆盖来源或内部路径时，分别设置 `origin`、`path`。
 
 ## Headers
 

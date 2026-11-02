@@ -13,13 +13,12 @@ export interface FastifyWebRequestOptions {
   readonly origin?: string;
   /** Override only the path used by the Web handler, for routes mounted under a Fastify prefix. */
   readonly path?: string;
-  /** Supply raw bytes explicitly when another Fastify parser has already consumed the body. */
-  readonly body?: BodyInit | Uint8Array | ArrayBuffer | null;
+  /** Supply raw bytes, text, or a Web stream when a Fastify parser has consumed the body. */
+  readonly body?: string | Uint8Array | ArrayBuffer | ReadableStream<Uint8Array> | null;
 }
 
-function rawBody(value: unknown): value is BodyInit | Uint8Array | ArrayBuffer {
+function rawBody(value: unknown): value is string | Uint8Array | ArrayBuffer | ReadableStream<Uint8Array> {
   return typeof value === 'string' || value instanceof Uint8Array || value instanceof ArrayBuffer
-    || value instanceof URLSearchParams || value instanceof Blob || value instanceof FormData
     || value instanceof ReadableStream;
 }
 
@@ -37,14 +36,9 @@ export function toWebRequest(request: FastifyRequest, options: FastifyWebRequest
   const supplied = Object.hasOwn(options, 'body');
   const body = supplied ? options.body : request.body;
   if (body !== undefined && body !== null && !rawBody(body)) {
-    throw new TypeError('Fastify request body must be raw bytes or explicitly supplied');
+    throw new TypeError('Fastify request body must be raw bytes, text, or a Web ReadableStream');
   }
-  if (supplied) {
-    headers.delete('content-length');
-    if (body instanceof FormData || body instanceof URLSearchParams || body instanceof Blob) {
-      headers.delete('content-type');
-    }
-  }
+  if (supplied) headers.delete('content-length');
   const method = request.method.toUpperCase();
   if ((method === 'GET' || method === 'HEAD') && body != null) throw new TypeError('GET and HEAD requests cannot have a body');
   const init: RequestInit & { duplex?: 'half' } = { method, headers, signal: request.signal };
