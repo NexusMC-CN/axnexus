@@ -92,6 +92,19 @@ function concat(chunks: Uint8Array[], size: number): Uint8Array {
 function response(body: unknown, status: number): Response {
   return Response.json(body, { status, headers: { 'cache-control': 'no-store', 'content-type': 'application/json; charset=utf-8' } });
 }
+function selectionEndpoint(endpoint: unknown): string {
+  if (typeof endpoint !== 'string' || !endpoint.startsWith('/') || endpoint.startsWith('//')
+    || endpoint.includes('?') || endpoint.includes('#')) {
+    throw new TypeError('Selection endpoint must be a normalized absolute path');
+  }
+  let parsed: URL;
+  try { parsed = new URL(endpoint, 'https://axnexus.invalid'); }
+  catch { throw new TypeError('Selection endpoint must be a normalized absolute path'); }
+  if (parsed.origin !== 'https://axnexus.invalid' || parsed.pathname !== endpoint) {
+    throw new TypeError('Selection endpoint must be a normalized absolute path');
+  }
+  return endpoint;
+}
 async function executeMany(fields: FieldMap, implementations: Record<string, FieldImplementation<any, any, any>>, selection: SelectionTree,
   parents: readonly unknown[], context: unknown, loaders: unknown, signal: AbortSignal, maxArrayLength: number): Promise<Record<string, unknown>[]> {
   const data: Record<string, unknown>[] = parents.map(() => Object.create(null));
@@ -155,6 +168,8 @@ async function executeMany(fields: FieldMap, implementations: Record<string, Fie
 export function createSelectionHandler<Context, Loaders = unknown>(options: {
   resources: readonly SelectionImplementation<any, any, Context, Loaders>[];
   limits: SelectionLimits;
+  /** Must match the client's endpoint path; defaults to /__axnexus/select. */
+  endpoint?: string;
   plans?: readonly SelectionPlan[];
   /** Require a registered plan id on the wire when false. Defaults to true. */
   allowDynamic?: boolean;
@@ -164,6 +179,7 @@ export function createSelectionHandler<Context, Loaders = unknown>(options: {
   observe?: SelectionObserver;
 }) {
   validLimits(options.limits);
+  const endpoint = selectionEndpoint(options.endpoint ?? '/__axnexus/select');
   if (options.allowDynamic === false && !options.plans?.length) throw new TypeError('Registered plans required when dynamic selection is disabled');
   const resources = new Map<string, SelectionImplementation<any, any, Context, Loaders>>();
   for (const resource of options.resources) {
@@ -183,7 +199,7 @@ export function createSelectionHandler<Context, Loaders = unknown>(options: {
     let status = 500;
     let code: string | undefined;
     try {
-      if (request.method !== 'POST' || new URL(request.url).pathname !== '/__axnexus/select') throw new SelectionFault(400, 'INVALID_REQUEST', 'Invalid selection route');
+      if (request.method !== 'POST' || new URL(request.url).pathname !== endpoint) throw new SelectionFault(400, 'INVALID_REQUEST', 'Invalid selection route');
       if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')) throw new SelectionFault(400, 'INVALID_REQUEST', 'JSON content type required');
       const body = await readBody(request, options.limits.maxRequestBytes);
       const payload = body.value;

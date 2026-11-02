@@ -9,7 +9,7 @@
 | 发送 HTTP 请求 | [安装](#安装)、[HTTP 快速开始](#http-快速开始)、[请求配置](#请求配置) |
 | 为 API 按需选字段 | [Selection 选择协议](#selection-选择协议)、[有界分页](#有界分页)、[批量加载](#请求内批量加载)、[注册方案](#已注册的选择方案) |
 | 处理生产环境的可靠性和性能 | [错误处理](#错误处理)、[重试](#重试)、[GET 缓存](#get-缓存)、[进度和限速](#进度和限速) |
-| 接入现有服务和生态 | [SSR 和一次性 JSON 请求](#ssr-和一次性-json-请求)、[端点契约](#端点契约)、[Fetch 桥接与 oRPC](#fetch-桥接与-orpc) |
+| 接入现有服务和生态 | [Fastify 服务端集成](#fastify-服务端集成)、[Nuxt 4 与 Nitro](#nuxt-4-与-nitro)、[SSR 和一次性 JSON 请求](#ssr-和一次性-json-请求)、[端点契约](#端点契约)、[Fetch 桥接与 oRPC](#fetch-桥接与-orpc) |
 | 观察请求行为 | [Selection 开发工具与观测](#开发工具与观测)、[HTTP 请求观测](#请求观测)、[OpenTelemetry](#opentelemetry) |
 
 ## 能力地图
@@ -18,7 +18,7 @@
 | --- | --- |
 | HTTP 核心 | Axios 风格实例与 `AxiosHeaders`；JSON、文本、`Blob`、`ArrayBuffer`、`FormData`、`Response`；超时、取消、拦截器、状态和转换钩子 |
 | 网络控制 | 结构化重试与 `Retry-After`、GET TTL 缓存和请求去重、下载/上传进度、响应大小限制、并发/频率调度、分块上传 |
-| 服务与生态 | SSR `fetchJson`、SSE/NDJSON、端点契约、Fetch 桥接、可选 Node HTTP/2 与注入式 HTTP/3、TanStack Query |
+| 服务与生态 | SSR `fetchJson`、SSE/NDJSON、端点契约、Fetch 桥接、Fastify 服务端集成、Nuxt 4/Nitro 接入、Node HTTP/2 与注入式 HTTP/3、TanStack Query |
 | Selection（可选） | 类型化字段契约、逐字段授权、查询预算、按需执行；分页、请求内批量加载、注册选择方案及观测扩展见下文 |
 
 核心零运行时依赖，支持现代浏览器、Node.js 18+ 和提供标准 Web API 的 Bun。可选集成按入口导入；根入口不加载 Node 传输或可选的生态依赖。
@@ -41,13 +41,14 @@ pnpm add @nexusmc-cn/axnexus
 | `@nexusmc-cn/axnexus/contracts` | [端点契约与业务错误](#端点契约) |
 | `@nexusmc-cn/axnexus/selection` | [共享字段契约与选择客户端](#selection-选择协议) |
 | `@nexusmc-cn/axnexus/selection/server` | [Selection 服务端处理器](#selection-选择协议) |
+| `@nexusmc-cn/axnexus/fastify` | [可选 Fastify Selection 路由与 Web Request/Response 桥接](#fastify-服务端集成) |
 | `@nexusmc-cn/axnexus/plugins` | [插件和生命周期事件类型](#context-和插件) |
 | `@nexusmc-cn/axnexus/observability` | [请求日志及自动接入](#请求观测) |
 | `@nexusmc-cn/axnexus/opentelemetry` | [可选 OpenTelemetry 插件](#opentelemetry) |
 | `@nexusmc-cn/axnexus/tanstack-query` | [可选 TanStack Query options](#tanstack-query) |
 | `@nexusmc-cn/axnexus/node-http2`、`@nexusmc-cn/axnexus/node-http3` | [Node 传输](#http2-和-http3) |
 
-只在使用 OpenTelemetry、TanStack Query 或 oRPC 时安装相应依赖，见各节说明。
+只在使用 Fastify、OpenTelemetry、TanStack Query 或 oRPC 集成时安装相应依赖，见各节说明。
 
 ## HTTP 快速开始
 
@@ -277,6 +278,128 @@ console.log(description.resource, inspected.metrics);
 ```
 
 `inspected.metrics` 包含 `fieldCount`、`depth`、`cost` 和字段 `paths`。在处理器中设置 `observe: (event) => logger.info(event)` 可记录请求模式（`dynamic`、`registered` 或 `invalid`）、状态、耗时、请求字节数与预算等元数据。回调不应记录资源参数、响应值或用户身份；观测回调失败不会改变协议响应。
+
+### Fastify 服务端集成
+
+普通 axnexus HTTP 客户端可以直接调用 Fastify 的现有 REST 路由，无需插件。若服务端要提供 Selection，可选装 Fastify 5（`>=5.7.3 <6`），从独立入口挂载 Selection POST 路由。`/fastify` 不由根入口加载。
+
+```bash
+pnpm add fastify@^5.7.3
+```
+
+沿用上文的 `server` 资源实现和 `limits`，在服务端注册：
+
+```typescript
+import Fastify, { type FastifyRequest } from 'fastify';
+import { createFastifySelectionPlugin } from '@nexusmc-cn/axnexus/fastify';
+
+declare function authenticate(request: FastifyRequest): Promise<{ id: string }>;
+
+const app = Fastify();
+await app.register(createFastifySelectionPlugin({
+  resources: [server],
+  limits,
+  getContext: async (request) => ({ principal: await authenticate(request) }),
+}), { prefix: '/api' });
+
+// POST /api/__axnexus/select
+```
+
+`getContext` 从服务端已验证的会话或令牌建立上下文，供资源和字段授权使用。插件只注册该 Selection 路由，保留应用原有 REST、上传、流式及其他 Fastify 路由的处理方式。插件在自己的封装范围内为 Selection 读取原始 JSON 字节；业务路由的解析器不受影响。
+
+`endpoint` 同时配置服务端处理器的内部路径和 Fastify 路由。例如插件传入 `endpoint: '/select/v1'` 且注册时传入 `{ prefix: '/api' }`，客户端应使用 `createSelectionClient(http, { endpoint: '/api/select/v1' })`。如果直接使用 `createSelectionHandler`，也应把它的 `endpoint` 与实际挂载路径对应起来。
+
+对于应用中已有的 Web `Request`/`Response` 处理器，可以逐路由使用通用桥接：
+
+```typescript
+import { sendWebResponse, toWebRequest } from '@nexusmc-cn/axnexus/fastify';
+
+declare function webStatusHandler(request: Request): Promise<Response>;
+
+app.get('/status', async (request, reply) => {
+  const response = await webStatusHandler(toWebRequest(request));
+  return sendWebResponse(reply, response);
+});
+```
+
+`toWebRequest` 保留方法、路径、请求头和取消信号；`sendWebResponse` 传递状态、响应头、多个 `Set-Cookie` 与响应流。`toWebRequest` 不把 Fastify 已解析的 JSON 或 multipart 对象重新序列化。桥接带请求体的路由时，应配置原始字节解析器，或显式传入 `toWebRequest(request, { body: rawBytes })`；显式 `body` 只接受文本、字节或 Web 流，不接受已构造的 `FormData`、`URLSearchParams`、`Blob`。multipart 路由要传入原始请求字节及匹配的 `Content-Type`。需要覆盖来源或内部路径时，分别设置 `origin`、`path`。
+
+### Nuxt 4 与 Nitro
+
+axnexus 的普通 HTTP 客户端可请求 Nuxt/Nitro 已有的 REST 路由；Selection 服务端使用框架无关的 `createSelectionHandler`，不需要安装 `@nexusmc-cn/axnexus/fastify` 或新的 Nuxt 模块。以下示例分别以 Nuxt 4.5.2 和 4.6.3 验证，项目仍须满足所用 Nuxt 版本的 Node 要求（4.5.2 为 `^22.19.0 || ^24.11.0 || >=26`，4.6.3 为 `^22.22.3 || ^24.15.0 || >=26`）。两种写法使用同一个 `server` 资源实现和 `limits`；`authenticate` 是应用自己的会话或令牌验证函数。
+
+**Nuxt 4.6+：** 在 `server/api/__axnexus/select.post.ts` 中使用 `nuxt/server` 的 Web Request/Response 接口：
+
+```typescript
+import { defineEventHandler } from 'nuxt/server';
+import { createSelectionHandler } from '@nexusmc-cn/axnexus/selection/server';
+import { server, limits } from '~~/server/utils/selection';
+import { authenticate } from '~~/server/utils/auth';
+
+const handler = createSelectionHandler({
+  resources: [server], limits, endpoint: '/api/__axnexus/select',
+});
+
+export default defineEventHandler(async (event) =>
+  handler(event.req, { principal: await authenticate(event.req) }));
+```
+
+**Nuxt 4.5：** 同一路由用 H3 v1 转换请求和响应；`toWebRequest` 在 H3 v1 中仍标注为不稳定，因此建议固定已验证的 Nuxt/H3 版本：
+
+```typescript
+import { defineEventHandler, sendWebResponse, toWebRequest } from 'h3';
+import { createSelectionHandler } from '@nexusmc-cn/axnexus/selection/server';
+import { server, limits } from '~~/server/utils/selection';
+import { authenticate } from '~~/server/utils/auth';
+
+const handler = createSelectionHandler({
+  resources: [server], limits, endpoint: '/api/__axnexus/select',
+});
+
+export default defineEventHandler(async (event) => {
+  const request = toWebRequest(event);
+  const response = await handler(request, { principal: await authenticate(request) });
+  return sendWebResponse(event, response);
+});
+```
+
+`server/api/...` 自动带 `/api` 前缀，所以两个服务端处理器和客户端都应使用 `/api/__axnexus/select`；如果改放在 `server/routes/__axnexus/select.post.ts`，路径则是 `/__axnexus/select`。身份必须从已验证的服务端上下文取得，不能相信请求体里的身份字段。Nuxt 应用仍负责 CORS、CSRF、会话校验与自己的认证钩子；Selection 处理器只负责协议、预算及资源和字段授权。
+
+Nuxt SSR 中，不要把含有 Cookie、租户或用户缓存的 axnexus 客户端放在进程级单例。每个请求单独创建客户端，内部路由使用当前请求事件的 `fetch`；传入的 Fetch `Headers` 先转为普通对象，以兼容 H3 v1 对请求头的处理。以下写法可放在页面的 `<script setup lang="ts">` 中，`users` 是上文的共享资源契约：
+
+```typescript
+import { createFetchAdapter, createHttpClient } from '@nexusmc-cn/axnexus';
+import { createSelectionClient } from '@nexusmc-cn/axnexus/selection';
+import { users } from '~~/shared/users-contract';
+
+const event = import.meta.server ? useRequestEvent() : undefined;
+const cookie = import.meta.server ? useRequestHeaders(['cookie']).cookie : undefined;
+const internalFetch: typeof fetch | undefined = event
+  ? (input, init) => {
+      if (typeof input !== 'string') throw new TypeError('Nuxt internal fetch requires a local path');
+      return event.fetch(input, {
+        ...init,
+        headers: Object.fromEntries(new Headers(init?.headers)),
+      });
+    }
+  : undefined;
+
+const { data } = await useAsyncData('user-42', async () => {
+  const http = createHttpClient({
+    adapter: createFetchAdapter(internalFetch),
+    headers: cookie ? { Cookie: cookie } : undefined,
+  });
+  try {
+    return await createSelectionClient(http, { endpoint: '/api/__axnexus/select' }).select(users, {
+      args: { id: '42' }, select: { id: true, name: true } as const,
+    });
+  } finally {
+    await http.close();
+  }
+});
+```
+
+`useAsyncData` 负责 SSR payload 与客户端水合，数据 key 应与资源及参数对应；登录、退出或切换用户后应失效相关 key。普通 REST 请求也可使用 axnexus；只需要 Nuxt 原生数据获取功能时，直接使用 `useFetch` 即可。裸 `$fetch` 在 SSR 中不会自动转发当前用户 Cookie，不能代替请求作用域内的身份头处理。
 
 ## Headers
 
