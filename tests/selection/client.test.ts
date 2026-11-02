@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHttpClient } from '../../dist/core/client.js';
 import { HttpError } from '../../dist/core/errors.js';
+import { AxiosHeaders } from '../../dist/headers/headers.js';
 import { array, defineSelectionResource, leaf, object } from '../../dist/selection/contract.js';
 import { createSelectionClient } from '../../dist/selection/client.js';
 import { SelectionError } from '../../dist/selection/errors.js';
@@ -128,6 +129,22 @@ test('selection client overrides default Content-Type for protocol JSON', async 
   const client = createSelectionClient(http, { endpoint });
   assert.deepEqual(await client.select(userResource, { args: {}, select: { id: true } }), { id: '42' });
   assert.equal(contentType, 'application/json');
+});
+
+test('selection client preserves caller headers while setting protocol Content-Type', async () => {
+  const supplied = new AxiosHeaders({ 'Content-Type': 'text/plain', 'X-Tenant': 'blue' });
+  let sentType = '';
+  let sentTenant = '';
+  const http = createHttpClient({ adapter: async (config) => {
+    sentType = config.headers.get('Content-Type') ?? '';
+    sentTenant = config.headers.get('X-Tenant') ?? '';
+    return Response.json({ data: { id: '42' } });
+  } });
+  const client = createSelectionClient(http, { endpoint });
+  await client.select(userResource, { args: {}, select: { id: true } }, { headers: supplied });
+  assert.equal(sentType, 'application/json');
+  assert.equal(sentTenant, 'blue');
+  assert.equal(supplied.get('Content-Type'), 'text/plain');
 });
 
 test('selection client does not retry a failed protocol POST', async () => {

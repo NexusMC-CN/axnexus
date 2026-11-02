@@ -85,7 +85,7 @@ export function createSelectionClient<Client extends Pick<HttpClient<any, any>, 
           if (signal?.aborted) throw error;
           throw new SelectionError('INVALID_ARGS', 'Invalid selection arguments', { cause: error });
         }
-        const headers = AxiosHeaders.from(config.headers);
+        const headers = new AxiosHeaders(config.headers);
         headers.set('Content-Type', 'application/json');
         const request: RequestConfig<ContextOf<Client>> = {
           ...config,
