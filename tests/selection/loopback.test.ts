@@ -35,3 +35,21 @@ test('public client and Web handler round trip selected fields and protocol erro
       (error: unknown) => error instanceof SelectionError && error.code === 'INVALID_ARGS');
   } finally { await http.close(); }
 });
+
+test('a transforming resolver schema uses an explicit wire schema for client verification', async () => {
+  const numeric = { '~standard': { validate(value: unknown) {
+    return typeof value === 'number' ? { value } : { issues: [{ message: 'number required' }] };
+  } } };
+  const numericText = { '~standard': { validate(value: unknown) {
+    return typeof value === 'string' && /^\d+$/.test(value)
+      ? { value: Number(value) } : { issues: [{ message: 'numeric text required' }] };
+  } } };
+  const typed = defineSelectionResource({ resource: 'numbers.byId.v1', args, fields: { count: leaf(numericText, { wireSchema: numeric }) } });
+  const resource = implementSelection(typed, { authorizeResource: () => true, load: () => ({}), fields: { count: { resolve: () => '42' } } });
+  const handler = createSelectionHandler({ resources: [resource], limits });
+  const http = createHttpClient({ adapter: async (config) => handler(new Request(config.url, { method: config.method, body: config.body, headers: config.headers, signal: config.signal }), {}) });
+  try {
+    const client = createSelectionClient(http, { endpoint: 'https://loopback.test/__axnexus/select' });
+    assert.deepEqual(await client.select(typed, { args: { id: '42' }, select: { count: true } }), { count: 42 });
+  } finally { await http.close(); }
+});

@@ -17,7 +17,9 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 export function validLimits(limits: SelectionLimits): void {
-  for (const [name, value] of Object.entries(limits)) {
+  if (!isRecord(limits)) throw new TypeError('Selection limits are required');
+  for (const name of ['maxRequestBytes', 'maxDepth', 'maxFields', 'maxCost', 'maxArrayLength'] as const) {
+    const value = limits[name];
     if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${name} must be a positive safe integer`);
   }
 }
@@ -83,7 +85,10 @@ export async function validateSelectedData(fields: FieldMap, selection: Selectio
     }
     if (field.kind === 'leaf') {
       if (nested !== true) throw new TypeError('Invalid leaf selection');
-      output[name] = await raceWithSignal(validateStandardSchema(value, field.schema), signal);
+      output[name] = await raceWithSignal(validateStandardSchema(value, field.wireSchema ?? field.schema), signal);
+      if (output[name] === undefined) throw new TypeError(`Selected field ${name} is undefined`);
+      if (output[name] === null && !field.nullable) throw new TypeError(`Non-null field ${name} is null`);
+      if (typeof output[name] === 'object' && output[name] !== null) throw new TypeError(`Selected field ${name} is not scalar`);
     } else if (field.kind === 'object') output[name] = await validateSelectedData(field.fields, nested as SelectionTree, value, signal);
     else {
       if (!Array.isArray(value)) throw new TypeError(`Array field ${name} is not an array`);

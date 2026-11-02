@@ -32,6 +32,19 @@ test('the published root ESM entry imports and performs a browser request', asyn
   expect(result).toEqual({ status: 200, method: 'GET', fetchAdapter: 'function', xhrAdapter: 'function' });
 });
 
+test('selection entry imports in a browser and validates a selected response', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { createHttpClient } = await import('/dist/index.js');
+    const { createSelectionClient, defineSelectionResource, leaf } = await import('/dist/selection/index.js');
+    const string = { '~standard': { validate(value: unknown) { return typeof value === 'string' ? { value } : { issues: [{ message: 'string required' }] }; } } };
+    const resource = defineSelectionResource({ resource: 'browser.byId.v1', args: string, fields: { id: leaf(string) } });
+    const http = createHttpClient({ adapter: async () => Response.json({ data: { id: 'browser' } }) });
+    try { return await createSelectionClient(http, { endpoint: '/__axnexus/select' }).select(resource, { args: '42', select: { id: true } }); }
+    finally { await http.close(); }
+  });
+  expect(result).toEqual({ id: 'browser' });
+});
+
 for (const transport of ['fetch', 'xhr'] as const) {
   test(`${transport}: cross-origin credentials default to same-origin and allow explicit include`, async ({ page, context, servers }) => {
     await context.addCookies([{ name: 'session', value: 'browser-session', url: servers.apiOrigin }]);

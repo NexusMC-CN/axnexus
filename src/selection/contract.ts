@@ -6,10 +6,15 @@ export interface FieldOptions<Nullable extends boolean = boolean> {
   readonly nullable?: Nullable;
   readonly cost?: number;
 }
+export interface LeafOptions<Output, Nullable extends boolean = boolean> extends FieldOptions<Nullable> {
+  /** Validates the serialized value after the resolver schema has transformed it. */
+  readonly wireSchema?: StandardSchema<Output>;
+}
 
 export interface LeafField<S extends Schema = Schema, N extends boolean = boolean> {
   readonly kind: 'leaf';
   readonly schema: S;
+  readonly wireSchema?: StandardSchema<InferSchemaOutput<S>>;
   readonly nullable: N;
   readonly cost: number;
 }
@@ -71,11 +76,12 @@ function checkFields(fields: FieldMap, seen: Set<object>): void {
 }
 
 export function leaf<S extends Schema>(schema: S): LeafField<S, false>;
-export function leaf<S extends Schema, const N extends boolean>(schema: S, options: FieldOptions<N>): LeafField<S, N>;
-export function leaf<S extends Schema>(schema: S, options: FieldOptions = {}): LeafField<S> {
+export function leaf<S extends Schema, const N extends boolean>(schema: S, options: LeafOptions<InferSchemaOutput<S>, N>): LeafField<S, N>;
+export function leaf<S extends Schema>(schema: S, options: LeafOptions<InferSchemaOutput<S>> = {}): LeafField<S> {
   options ??= {};
   schemaOf(schema);
-  return { kind: 'leaf', schema, nullable: options.nullable ?? false, cost: costOf(options.cost) };
+  if (options.wireSchema !== undefined) schemaOf(options.wireSchema);
+  return { kind: 'leaf', schema, wireSchema: options.wireSchema, nullable: options.nullable ?? false, cost: costOf(options.cost) };
 }
 export function object<const F extends FieldMap>(fields: F): ObjectField<F, false>;
 export function object<const F extends FieldMap, const N extends boolean>(fields: F, options: FieldOptions<N>): ObjectField<F, N>;
@@ -106,6 +112,14 @@ export type SelectionFor<F extends FieldMap> = {
   readonly [K in keyof F]?: F[K] extends LeafField<any, any> ? true
     : F[K] extends ObjectField<infer Nested, any> ? SelectionFor<Nested>
     : F[K] extends ArrayField<infer Element, any> ? SelectionFor<Element['fields']> : never;
+};
+export type ExactSelection<F extends FieldMap, S> = {
+  [K in keyof S]: K extends keyof F
+    ? F[K] extends LeafField<any, any> ? S[K] extends true | undefined ? S[K] : never
+      : F[K] extends ObjectField<infer Nested, any> ? S[K] extends object ? ExactSelection<Nested, S[K]> : S[K]
+        : F[K] extends ArrayField<infer Element, any> ? S[K] extends object ? ExactSelection<Element['fields'], S[K]> : S[K]
+          : never
+    : never;
 };
 type NullableValue<T, N extends boolean> = true extends N ? T | null : T;
 type SelectionAt<S, K extends PropertyKey> = K extends keyof S ? NonNullable<S[K]> : never;

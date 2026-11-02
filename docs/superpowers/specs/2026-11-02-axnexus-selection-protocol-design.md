@@ -1,7 +1,7 @@
 # axnexus Selection 协议设计
 
 日期：2026-11-02
-状态：待用户审查
+状态：已获用户批准并实施
 范围：独立的按需读取协议及 TypeScript 客户端、服务端运行时
 
 ## 目标和边界
@@ -59,6 +59,7 @@
     // 结果：{ id: string; name: string; profile: { avatar: string } | null } | null
 
 客户端永远不导入含服务端 resolver 或 authorize 函数的对象。leaf 从 Standard Schema 的输出推导类型；object 递归投影子字段；array 在投影元素后保留数组层；nullable 在相应节点增加 null。静态 const 选择精确推导这些类型。运行时动态选择只保证资源公开字段所构成的保守部分形状；当 TypeScript 无法证明选择树是固定字面量时，不承诺某个字段必有。首版不支持省略语义：已选字段必须出现，允许为空时显式返回 null。数组元素首版不可为 null；拒绝授权时不得通过省略字段伪装成功。客户端类型只是本地契约推导，服务端运行时校验才是权威。
+如叶子字段的 Standard Schema 会转换 resolver 原值，必须显式配置 `leaf(schema, { wireSchema })`，其中 wireSchema 验证序列化后的输出形态；未配置时沿用原 schema 并要求其可再次验证输出。
 
 ## 请求、响应与执行
 

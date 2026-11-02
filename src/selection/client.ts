@@ -4,7 +4,7 @@ import { scheduleTimer } from '../core/lifecycle/timers.js';
 import { validateStandardSchema } from '../core/schema.js';
 import { HttpError, isHttpError } from '../core/errors.js';
 import type { HttpClient, HttpResponse, RequestConfig } from '../core/types.js';
-import type { SelectionArgs, SelectionFor, SelectionResource, SelectionResult } from './contract.js';
+import type { ExactSelection, SelectionArgs, SelectionFor, SelectionResource, SelectionResult } from './contract.js';
 import { SelectionError } from './errors.js';
 import { isRecord, SelectionFault, validateSelectedData, validateSelectionTree } from './validation.js';
 import { combineSignals } from '../utils/signal.js';
@@ -55,16 +55,11 @@ function protocolError(payload: unknown, status: number, cause: unknown): Select
 /** Use a regular axnexus transport while keeping protocol decoding local. */
 export function createSelectionClient<Client extends Pick<HttpClient<any, any>, 'requestResponse'>>(
   client: Client, options: SelectionClientOptions,
-): {
-  select<R extends SelectionResource, const S extends SelectionFor<R['fields']>>(
-    resource: R, input: { args: SelectionArgs<R>; select: S }, config?: SelectionRequestConfig<ContextOf<Client>>,
-  ): Promise<SelectionResult<R, S>>;
-} {
+) {
   validateEndpoint(options?.endpoint);
-  return {
-    async select<R extends SelectionResource, const S extends SelectionFor<R['fields']>>(
-      resource: R, input: { args: SelectionArgs<R>; select: S }, config: SelectionRequestConfig<ContextOf<Client>> = {},
-    ): Promise<SelectionResult<R, S>> {
+  const select = async <R extends SelectionResource, const S extends SelectionFor<R['fields']>>(
+      resource: R, input: { args: SelectionArgs<R>; select: S & ExactSelection<R['fields'], S> }, config: SelectionRequestConfig<ContextOf<Client>> = {},
+    ): Promise<SelectionResult<R, S>> => {
       let selection;
       try { selection = validateSelectionTree(resource.fields, input.select, localLimits); }
       catch (error) {
@@ -141,6 +136,6 @@ export function createSelectionClient<Client extends Pick<HttpClient<any, any>, 
         cancelTimer?.();
         combined.cleanup();
       }
-    },
-  };
+    };
+  return { select };
 }

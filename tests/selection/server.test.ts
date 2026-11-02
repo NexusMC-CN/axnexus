@@ -152,3 +152,76 @@ test('server keeps array element runtime shape and rejects null rows', async () 
   assert.equal(response.status, 500);
   assert.equal((await response.json()).error.code, 'INTERNAL_ERROR');
 });
+
+test('every handler budget limit is mandatory at runtime', () => {
+  assert.throws(() => createSelectionHandler({ resources: [], limits: { maxRequestBytes: 1024 } as never }), /maxDepth/);
+});
+
+test('selected leaf schema cannot serialize undefined as a missing field', async () => {
+  const undefinedSchema = { '~standard': { validate: () => ({ value: undefined }) } };
+  const undefinedContract = defineSelectionResource({ resource: 'missing.leaf.v1', args, fields: { id: leaf(undefinedSchema) } });
+  const resource = implementSelection(undefinedContract, { authorizeResource: () => true, load: () => ({}), fields: { id: { resolve: () => '42' } } });
+  const handler = createSelectionHandler({ resources: [resource], limits });
+  const result = await handler(request({ id: true }, { resource: undefinedContract.resource }), {});
+  assert.equal(result.status, 500);
+  assert.deepEqual(await result.json(), { error: { code: 'INTERNAL_ERROR', message: 'Selection execution failed' } });
+});
+
+test('body over limit returns promptly when stream cancellation stalls', async () => {
+  let canceled = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array(20)); },
+    cancel() { canceled++; return new Promise<void>(() => {}); },
+  });
+  const handler = createSelectionHandler({ resources: [], limits: { ...limits, maxRequestBytes: 10 } });
+  const request = new Request('https://test.example/__axnexus/select', { method: 'POST', headers: { 'content-type': 'application/json' }, body: stream, duplex: 'half' });
+  const result = await Promise.race([handler(request, {}), new Promise<'stalled'>((resolve) => setTimeout(() => resolve('stalled'), 100))]);
+  assert.notEqual(result, 'stalled');
+  if (result !== 'stalled') assert.equal(result.status, 413);
+  assert.equal(canceled, 1);
+});
+
+test('scalar resource args follow their declared Standard Schema', async () => {
+  const scalar = defineSelectionResource({ resource: 'lookup.byKey.v1', args: string, fields: { id: leaf(string) } });
+  const resource = implementSelection(scalar, { authorizeResource: () => true, load: ({ args: key }) => ({ id: key }), fields: { id: { resolve: ({ parent }) => parent.id } } });
+  const handler = createSelectionHandler({ resources: [resource], limits });
+  const result = await handler(request({ id: true }, { resource: scalar.resource, args: '42' }), {});
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { data: { id: '42' } });
+});
+
+test('leaf fields reject object values that would bypass explicit object selection', async () => {
+  const objectSchema = { '~standard': { validate: () => ({ value: { hidden: 'secret' } }) } };
+  const objectContract = defineSelectionResource({ resource: 'unsafe.leaf.v1', args, fields: { detail: leaf(objectSchema) } });
+  const resource = implementSelection(objectContract, { authorizeResource: () => true, load: () => ({}), fields: { detail: { resolve: () => ({ hidden: 'secret' }) } } });
+  const handler = createSelectionHandler({ resources: [resource], limits });
+  const result = await handler(request({ detail: true }, { resource: objectContract.resource }), {});
+  assert.equal(result.status, 500);
+});
+
+test('non-null leaf schemas cannot turn a value into null', async () => {
+  const nullSchema = { '~standard': { validate: () => ({ value: null }) } };
+  const nullContract = defineSelectionResource({ resource: 'unsafe.null.v1', args, fields: { id: leaf(nullSchema) } });
+  const resource = implementSelection(nullContract, { authorizeResource: () => true, load: () => ({}), fields: { id: { resolve: () => '42' } } });
+  const handler = createSelectionHandler({ resources: [resource], limits });
+  assert.equal((await handler(request({ id: true }, { resource: nullContract.resource }), {})).status, 500);
+});
+
+test('depth and field count budgets reject before resource authorization', async () => {
+  const depth = setup();
+  const restrictedDepth = createSelectionHandler({ resources: [implementSelection(contract, { authorizeResource: () => { depth.seen.push('resourceAuth'); return true; }, load: () => null, fields: {
+    id: { resolve: () => 'x' }, name: { resolve: () => 'x' }, email: { resolve: () => 'x' },
+    profile: { resolve: () => null, fields: { avatar: { resolve: () => 'x' } } },
+    teams: { resolve: () => [], fields: { name: { resolve: () => 'x' } } },
+  } })], limits: { ...limits, maxDepth: 1 } });
+  assert.equal((await restrictedDepth(request({ profile: { avatar: true } }), {})).status, 413);
+  const count = setup();
+  const narrow = createSelectionHandler({ resources: [implementSelection(contract, { authorizeResource: () => { count.seen.push('resourceAuth'); return true; }, load: () => null, fields: {
+    id: { resolve: () => 'x' }, name: { resolve: () => 'x' }, email: { resolve: () => 'x' },
+    profile: { resolve: () => null, fields: { avatar: { resolve: () => 'x' } } },
+    teams: { resolve: () => [], fields: { name: { resolve: () => 'x' } } },
+  } })], limits: { ...limits, maxFields: 1 } });
+  assert.equal((await narrow(request({ id: true, name: true }), {})).status, 413);
+  assert.deepEqual(depth.seen, []);
+  assert.deepEqual(count.seen, []);
+});

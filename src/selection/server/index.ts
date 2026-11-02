@@ -51,7 +51,7 @@ async function readBody(request: Request, maxBytes: number): Promise<unknown> {
       if (size > maxBytes) throw new SelectionFault(413, 'REQUEST_TOO_LARGE', 'Request body exceeded limit');
       chunks.push(part.value);
     }
-  } catch (error) { await reader.cancel().catch(() => undefined); throw error; }
+  } catch (error) { void reader.cancel().catch(() => undefined); throw error; }
   finally { reader.releaseLock(); }
   let text: string;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(concat(chunks, size)); }
@@ -84,7 +84,13 @@ async function execute(fields: FieldMap, implementations: Record<string, FieldIm
     if (value === null) {
       if (!field.nullable) throw new TypeError('Non-null resolver result');
       data[name] = null;
-    } else if (field.kind === 'leaf') data[name] = await raceWithSignal(validateStandardSchema(value, field.schema), signal);
+    } else if (field.kind === 'leaf') {
+      const validated = await raceWithSignal(validateStandardSchema(value, field.schema), signal);
+      if (validated === undefined) throw new TypeError('Selected field must have a defined value');
+      if (validated === null && !field.nullable) throw new TypeError('Non-null field is null');
+      if (typeof validated === 'object' && validated !== null) throw new TypeError('Leaf field must be a scalar');
+      data[name] = validated;
+    }
     else if (field.kind === 'object') {
       if (!isRecord(value)) throw new TypeError('Object resolver result required');
       data[name] = await execute(field.fields, implementation.fields!, nested as SelectionTree, value, context, signal, maxArrayLength);
@@ -116,7 +122,7 @@ export function createSelectionHandler<Context>(options: { resources: readonly S
       if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')) throw new SelectionFault(400, 'INVALID_REQUEST', 'JSON content type required');
       const payload = await readBody(request, options.limits.maxRequestBytes);
       if (!isRecord(payload) || payload.protocol !== 'axnexus.selection' || payload.version !== 1
-        || typeof payload.resource !== 'string' || !isRecord(payload.args) || !isRecord(payload.select)
+        || typeof payload.resource !== 'string' || !Object.hasOwn(payload, 'args') || !isRecord(payload.select)
         || Object.keys(payload).some((key) => !['protocol', 'version', 'resource', 'args', 'select'].includes(key))) {
         throw new SelectionFault(400, 'INVALID_REQUEST', 'Invalid selection protocol request');
       }

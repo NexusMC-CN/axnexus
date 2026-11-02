@@ -20,6 +20,10 @@ void exact;
 picked.then(user => user?.email);
 // @ts-expect-error unknown selection field is rejected
 client.select(resource, { args: { id: 42 }, select: { secret: true } });
+// @ts-expect-error unknown field remains rejected beside a valid field
+client.select(resource, { args: { id: 42 }, select: { id: true, secret: true } });
+// @ts-expect-error unknown nested field remains rejected beside a valid child
+client.select(resource, { args: { id: 42 }, select: { profile: { avatar: true, secret: true } } });
 // @ts-expect-error argument input is numeric, not its schema output
 client.select(resource, { args: { id: '42' }, select: { id: true } });
 // @ts-expect-error preserve bound client context type

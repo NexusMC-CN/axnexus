@@ -19,6 +19,7 @@
 - 可选 Node HTTP/2 adapter，以及只通过注入 transport 启用的 HTTP/3 adapter。
 - CSRF 通过显式拦截器接入，不修改全局 `fetch`，不读取页面 Cookie。
 - Standard Schema 输入/输出类型推导、结构化校验错误，以及 SSE/NDJSON、Fetch 桥接和轻量端点契约。
+- 可选的 Selection JSON 协议：客户端只选字段，服务端逐字段授权、执行并限制查询预算。
 - 类型化本地 context、客户端插件、自动日志，以及可选 OpenTelemetry 和 TanStack Query 集成。
 
 ## 安装
@@ -37,6 +38,8 @@ pnpm add @nexusmc-cn/axnexus
 | `@nexusmc-cn/axnexus/stream` | [SSE/NDJSON 消费与 SSE 重连](#sse-和-ndjson) |
 | `@nexusmc-cn/axnexus/fetch` | [为 oRPC 等 SDK 提供 Fetch](#fetch-桥接与-orpc) |
 | `@nexusmc-cn/axnexus/contracts` | [端点契约与业务错误](#端点契约) |
+| `@nexusmc-cn/axnexus/selection` | [共享字段契约与选择客户端](#selection-按需选字段) |
+| `@nexusmc-cn/axnexus/selection/server` | [Selection 服务端处理器](#selection-按需选字段) |
 | `@nexusmc-cn/axnexus/plugins` | [插件和生命周期事件类型](#context-和插件) |
 | `@nexusmc-cn/axnexus/observability` | [请求日志及自动接入](#请求观测) |
 | `@nexusmc-cn/axnexus/opentelemetry` | [可选 OpenTelemetry 插件](#opentelemetry) |
@@ -69,6 +72,59 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 跨源鉴权需要显式设置 `credentials: 'include'`，服务端须正确配置 CORS 和 `Access-Control-Allow-Credentials`。公开 API 可设置 `credentials: 'omit'`。升级到 `0.2.0` 时，依赖跨源 Cookie 或自动请求 ID 的调用方需要显式开启相应选项；其他兼容性变化见[变更记录](./CHANGELOG.md)。
 
 `trace` 和 `connect` 便捷方法保留给支持相应方法的自定义 adapter。内置 Fetch（包括 Node Fetch）和 XHR 会在发送前抛出 `ERR_UNSUPPORTED_METHOD`，不会把它们当作网络故障重试。
+
+## Selection 按需选字段
+
+Selection 是 axnexus 自有的可选 JSON 协议，不使用 GraphQL 查询语言。共享契约只放公开字段形状；服务端 resolver 与权限函数仅从 `/selection/server` 引入。需要调用方显式配置同源/跨源访问、认证和 CSRF 策略。
+
+共享契约与客户端：
+
+```typescript
+import { createHttpClient } from '@nexusmc-cn/axnexus';
+import { createSelectionClient, defineSelectionResource, leaf } from '@nexusmc-cn/axnexus/selection';
+
+const stringSchema = { '~standard': { validate(value: unknown) {
+  return typeof value === 'string' ? { value } : { issues: [{ message: 'Expected string' }] };
+} } };
+const argsSchema = { '~standard': { validate(value: unknown) {
+  return value && typeof value === 'object' && 'id' in value && typeof value.id === 'string'
+    ? { value: { id: value.id } } : { issues: [{ message: 'Expected id' }] };
+} } };
+export const users = defineSelectionResource({
+  resource: 'users.byId.v1', args: argsSchema, nullable: true,
+  fields: { id: leaf(stringSchema), name: leaf(stringSchema) },
+});
+const http = createHttpClient({ baseURL: 'https://api.example.com' });
+const selection = createSelectionClient(http, { endpoint: '/__axnexus/select' });
+const user = await selection.select(users, {
+  args: { id: '42' }, select: { id: true, name: true } as const,
+});
+// user: { id: string; name: string } | null
+```
+
+服务端将共享契约从独立模块导入，并定义实际读取逻辑：
+
+```typescript
+import { createSelectionHandler, implementSelection } from '@nexusmc-cn/axnexus/selection/server';
+import { users } from './users-contract.js';
+
+declare function readUserName(id: string): Promise<string>;
+const server = implementSelection(users, {
+  authorizeResource: ({ context }) => Boolean(context),
+  load: async ({ args }) => ({ id: args.id }), // 只载入字段授权所需的最小身份数据
+  fields: {
+    id: { resolve: ({ parent }) => parent.id },
+    name: { resolve: async ({ parent }) => readUserName(parent.id) },
+  },
+});
+const handler = createSelectionHandler({ resources: [server], limits: {
+  maxRequestBytes: 8192, maxDepth: 4, maxFields: 20, maxCost: 100, maxArrayLength: 50,
+} });
+// 框架路由 POST /__axnexus/select：return handler(request, authenticatedContext);
+```
+
+协议固定 POST，成功体为 `{ data }`，失败体为 `{ error: { code, message } }`。首版单资源、只读、无部分成功、无结果缓存；服务端总是返回 `Cache-Control: no-store`。静态选择可精确推导返回字段，动态选择只得到保守的可选字段类型。资源和字段权限必须在相应读取前检查；根加载器不接收选择树，避免预读未授权字段。
+若叶子 schema 会把 resolver 值转换成另一种 JSON 形态，给 `leaf(schema, { wireSchema })` 配置校验转换后值的 schema；客户端用它校验服务器返回值。普通只校验、不转换的字段可省略。
 
 ## Headers
 
