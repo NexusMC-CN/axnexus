@@ -107,6 +107,7 @@
     "test:bun": "pnpm run build:bun && bun test --cwd tests",
     "test:types": "tsc -p tsconfig.types.json",
     "test:consumer": "node scripts/consumer-test.mjs",
+    "test:nuxt": "pnpm run build && node scripts/nuxt-consumer-test.mjs",
     "test:browser": "playwright test",
     "prepack": "pnpm run build"
   },

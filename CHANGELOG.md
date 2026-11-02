@@ -14,7 +14,7 @@
 
 ### 文档
 
-- 重设计 README 的任务导航、快速开始、Selection 四项扩展示例及 Fastify 接入说明。
+- 重设计 README 的任务导航、快速开始、Selection 四项扩展示例及 Fastify 接入说明；补充 Nuxt 4.5/4.6+ 的 Nitro 路由与 SSR 接入示例，并以独立消费应用验证。
 
 ## 0.3.0 · 2026-10-28
 
