@@ -1,19 +1,21 @@
 # axnexus
 
-基于原生 Fetch/XHR 的 TypeScript HTTP 客户端。提供实例、拦截器、`AxiosHeaders`、重试、缓存和流式响应；可选的 axnexus Selection JSON 协议用于按需选择字段，共用 HTTP 传输，无需 GraphQL 服务。
+[简体中文](./README.zh-CN.md)
 
-**Node.js >=20 · ESM only · 内置 TypeScript 类型 · 核心零运行时依赖**
+A TypeScript HTTP client built on native Fetch/XHR, with instance APIs, interceptors, `AxiosHeaders`, retries, caching, and streaming responses. The optional axnexus Selection JSON protocol lets clients select the fields they need over the same HTTP transport, without a GraphQL server.
 
-支持现代浏览器和提供标准 Web API 的 Bun。根入口不加载 Node 传输或可选集成依赖。完整用法见[使用指南](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md)，升级记录见 [CHANGELOG](./CHANGELOG.md)。
+**Node.js >=20 · ESM only · Built-in TypeScript types · Zero runtime dependencies in core**
 
-## 安装
+Supports modern browsers and Bun environments that provide standard Web APIs. The root entry does not load Node transports or optional integrations. See the [full guide](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md) and [changelog (Chinese)](./CHANGELOG.md).
+
+## Installation
 
 ```bash
-npm install @nexusmc-cn/axnexus
-# 或 pnpm add @nexusmc-cn/axnexus
+pnpm add @nexusmc-cn/axnexus
+# Or: npm install @nexusmc-cn/axnexus
 ```
 
-包仅发布 ESM，没有 `require` 导出条件。CommonJS 项目通过动态 `import()` 加载：
+The package ships ESM only, with no `require` export condition. CommonJS applications can use dynamic `import()`:
 
 ```javascript
 // app.cjs
@@ -25,11 +27,11 @@ async function main() {
 main().catch(console.error);
 ```
 
-Fastify、OpenTelemetry 和 TanStack Query 为**可选 peer**，仅在使用相应入口时安装，版本范围见[公共入口](#公共入口)与 `package.json`；oRPC 示例需要应用自行安装 `@orpc/client`。
+Fastify, OpenTelemetry, and TanStack Query are **optional peers**. Install them only when using their integration entries; supported versions appear in the [entry table](#public-entries) and `package.json`. The oRPC examples also require the application to install `@orpc/client`.
 
-发布包保留 `src`，供 JavaScript 和类型声明的 source map 定位源码。应用应从公共入口导入。
+Published packages include `src` so JavaScript and declaration source maps can locate their sources. Import from the public entries in application code.
 
-## HTTP 快速开始
+## HTTP quick start
 
 ```typescript
 import { createHttpClient } from '@nexusmc-cn/axnexus';
@@ -46,39 +48,52 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 });
 ```
 
-便捷方法直接返回解析后的数据；需要状态、headers 和 timings 时使用 [`getResponse` 等完整响应方法](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#完整响应)。配置 Standard Schema 后可[自动推导返回类型](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#schema-与类型推导)。
+Convenience methods return parsed data directly. Use [complete response methods such as `getResponse`](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#complete-responses) for status, headers, and timings. Configure Standard Schema for [inferred response types](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#schema-and-type-inference).
 
-默认凭据策略为 `same-origin`；跨源 Cookie 鉴权显式设置 `credentials: 'include'`，公开 API 可设置 `credentials: 'omit'`。默认不生成 `X-Request-Id`，可通过 `requestId: true` 开启。身份相关缓存应使用[会话分区](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#get-缓存)，SSR 应创建请求级客户端。
+The default credential policy is `same-origin`. Set `credentials: 'include'` explicitly for cross-origin cookies, or `credentials: 'omit'` for public APIs. `X-Request-Id` is disabled by default; enable it with `requestId: true`. Use [session partitions](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#get-cache) for identity-dependent caching, and create a client per request during SSR.
 
-## 公共入口
+## Public entries
 
-下表列出可导入入口及对应指南。Node 传输仅在显式导入后启用；可选集成的运行环境还须满足所用框架的要求。
+Node transports are enabled only when explicitly imported. Optional integrations must also meet their framework's runtime requirements.
 
-| 入口 | 用途与文档 |
+| Entry | Purpose and documentation |
 | --- | --- |
-| `@nexusmc-cn/axnexus` | [HTTP 客户端与配置](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#请求配置)、[headers](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#headers)、[错误处理](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#错误处理)、缓存、上传及日志 |
-| `@nexusmc-cn/axnexus/stream` | [SSE/NDJSON 增量读取与 SSE 重连](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#sse-和-ndjson) |
-| `@nexusmc-cn/axnexus/fetch` | [Fetch 桥接与 oRPC](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#fetch-桥接与-orpc) |
-| `@nexusmc-cn/axnexus/contracts` | [端点契约与业务错误](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#端点契约) |
-| `@nexusmc-cn/axnexus/selection` | [共享字段契约与选择客户端](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#selection-选择协议) |
-| `@nexusmc-cn/axnexus/selection/server` | [Selection 服务端、授权与预算](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#服务端执行) |
-| `@nexusmc-cn/axnexus/fastify` | [Fastify Selection 路由与 Web 桥接](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#fastify-服务端集成)；可选 peer `fastify >=5.12.8 <6` |
-| `@nexusmc-cn/axnexus/plugins` | [Context、插件与生命周期事件](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#context-和插件) |
-| `@nexusmc-cn/axnexus/observability` | [请求观测与自动日志](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#请求观测) |
-| `@nexusmc-cn/axnexus/opentelemetry` | [OpenTelemetry 插件](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#opentelemetry)；可选 peer `@opentelemetry/api >=1.9.0 <2` |
-| `@nexusmc-cn/axnexus/tanstack-query` | [TanStack Query options](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#tanstack-query)；可选 peer `@tanstack/query-core ^5.104.5` |
-| `@nexusmc-cn/axnexus/node-http2` | [Node HTTP/2 adapter](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#http2-和-http3) |
-| `@nexusmc-cn/axnexus/node-http3` | [注入 QUIC transport 的 HTTP/3 adapter](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#http2-和-http3) |
-| `@nexusmc-cn/axnexus/package.json` | 包版本、运行环境和依赖元数据 |
+| `@nexusmc-cn/axnexus` | [HTTP client and configuration](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#request-configuration), [headers](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#headers), [errors](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#error-handling), caching, uploads, and logging |
+| `@nexusmc-cn/axnexus/stream` | [Incremental SSE/NDJSON reading and SSE reconnection](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#sse-and-ndjson) |
+| `@nexusmc-cn/axnexus/fetch` | [Fetch bridge and oRPC](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#fetch-bridge-and-orpc) |
+| `@nexusmc-cn/axnexus/contracts` | [Endpoint contracts and business errors](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#endpoint-contracts) |
+| `@nexusmc-cn/axnexus/selection` | [Shared field contracts and the selection client](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#selection-protocol) |
+| `@nexusmc-cn/axnexus/selection/server` | [Selection server, authorization, and budgets](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#server-execution) |
+| `@nexusmc-cn/axnexus/fastify` | [Fastify Selection routes and Web bridge](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#fastify-server-integration); optional peer `fastify >=5.12.8 <6` |
+| `@nexusmc-cn/axnexus/plugins` | [Context, plugins, and lifecycle events](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#context-and-plugins) |
+| `@nexusmc-cn/axnexus/observability` | [Request observability and automatic logging](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#request-observability) |
+| `@nexusmc-cn/axnexus/opentelemetry` | [OpenTelemetry plugin](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#opentelemetry); optional peer `@opentelemetry/api >=1.9.0 <2` |
+| `@nexusmc-cn/axnexus/tanstack-query` | [TanStack Query options](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#tanstack-query); optional peer `@tanstack/query-core ^5.104.5` |
+| `@nexusmc-cn/axnexus/node-http2` | [Node HTTP/2 adapter](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#http2-and-http3) |
+| `@nexusmc-cn/axnexus/node-http3` | [HTTP/3 adapter with an injected QUIC transport](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#http2-and-http3) |
+| `@nexusmc-cn/axnexus/package.json` | Package version, runtime requirements, and dependency metadata |
 
-## 深入使用
+## Further reading
 
-- HTTP：[重试](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#重试)、[取消和超时](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#取消和超时)、[拦截器](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#拦截器)、[进度和限速](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#进度和限速)、[分块上传](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#分块上传)、[CSRF](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#csrf)。
-- Selection：[协议与安全边界](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#协议与安全边界)、[有界分页](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#有界分页)、[请求内批量加载](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#请求内批量加载)、[已注册选择方案](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#已注册的选择方案)、[开发工具与观测](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#开发工具与观测)。
-- 框架与运行环境：[Nuxt 4/Nitro](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#nuxt-4-与-nitro)、[SSR JSON helpers](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#ssr-和一次性-json-请求)、[Bun](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#bun-运行时)、[运行环境差异](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#运行环境差异)。
+- HTTP: [retry](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#retry), [cancellation and timeouts](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#cancellation-and-timeouts), [interceptors](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#interceptors), [progress and rate limiting](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#progress-and-rate-limiting), [chunked uploads](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#chunked-uploads), and [CSRF](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#csrf).
+- Selection: [protocol and security boundaries](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#protocol-and-security-boundaries), [bounded pagination](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#bounded-pagination), [request-scoped batch loading](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#request-scoped-batch-loading), [registered selection plans](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#registered-selection-plans), and [developer tools and observability](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#developer-tools-and-observability).
+- Frameworks and runtimes: [Nuxt 4/Nitro](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#nuxt-4-and-nitro), [SSR JSON helpers](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#ssr-and-one-off-json-requests), [Bun](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#bun-runtime), and [runtime differences](https://github.com/NexusMC-CN/axnexus/blob/main/docs/guide.md#runtime-differences).
 
-## 许可证
+## Development
+
+Use the pnpm version pinned in `packageManager` for development:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm test
+pnpm run test:types
+pnpm run test:consumer
+pnpm pack
+```
+
+The development workflow and CI use pnpm. `prepack` uses `npm run build` so packing or publishing with npm also works without a global pnpm installation. Release setup and verification are covered in the [publishing guide](https://github.com/NexusMC-CN/axnexus/blob/main/docs/releasing.md).
+
+## License
 
 [MIT](./LICENSE)
-
-维护者发布步骤见[发布指南](https://github.com/NexusMC-CN/axnexus/blob/main/docs/releasing.md)。
