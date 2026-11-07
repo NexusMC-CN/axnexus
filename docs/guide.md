@@ -1,58 +1,58 @@
-# axnexus 使用指南
+# axnexus Guide
 
-[返回项目首页](../README.md) · [变更记录](../CHANGELOG.md)
+[Project home](../README.md) · [简体中文](./guide.zh-CN.md) · [Changelog](../CHANGELOG.md)
 
-基于原生 Fetch/XHR 的 TypeScript HTTP 客户端。日常请求使用熟悉的实例 API；需要按需返回字段时，可以选择独立的 **axnexus Selection** JSON 协议。两者共用 HTTP 传输，但 Selection 不要求 GraphQL 服务、查询语言或运行时依赖。
+A TypeScript HTTP client built on native Fetch/XHR. Use the familiar instance API for everyday requests; choose the separate **axnexus Selection** JSON protocol when you need to request only specific fields. Both share HTTP transport, but Selection requires no GraphQL server, query language, or runtime dependencies.
 
-## 从这里开始
+## Start here
 
-| 你要做什么 | 先看哪里 |
+| What you want to do | Where to start |
 | --- | --- |
-| 发送 HTTP 请求 | [安装](#安装)、[HTTP 快速开始](#http-快速开始)、[请求配置](#请求配置) |
-| 为 API 按需选字段 | [Selection 选择协议](#selection-选择协议)、[有界分页](#有界分页)、[批量加载](#请求内批量加载)、[注册方案](#已注册的选择方案) |
-| 处理生产环境的可靠性和性能 | [错误处理](#错误处理)、[重试](#重试)、[GET 缓存](#get-缓存)、[进度和限速](#进度和限速) |
-| 接入现有服务和生态 | [Fastify 服务端集成](#fastify-服务端集成)、[Nuxt 4 与 Nitro](#nuxt-4-与-nitro)、[SSR 和一次性 JSON 请求](#ssr-和一次性-json-请求)、[端点契约](#端点契约)、[Fetch 桥接与 oRPC](#fetch-桥接与-orpc) |
-| 观察请求行为 | [Selection 开发工具与观测](#开发工具与观测)、[HTTP 请求观测](#请求观测)、[OpenTelemetry](#opentelemetry) |
+| Send HTTP requests | [Installation](#installation), [HTTP quick start](#http-quick-start), [Request configuration](#request-configuration) |
+| Select API fields on demand | [Selection protocol](#selection-protocol), [Bounded pagination](#bounded-pagination), [Request-scoped batch loading](#request-scoped-batch-loading), [Registered selection plans](#registered-selection-plans) |
+| Handle production reliability and performance | [Error handling](#error-handling), [Retry](#retry), [GET cache](#get-cache), [Progress and rate limiting](#progress-and-rate-limiting) |
+| Integrate existing services and ecosystems | [Fastify server integration](#fastify-server-integration), [Nuxt 4 and Nitro](#nuxt-4-and-nitro), [SSR and one-off JSON requests](#ssr-and-one-off-json-requests), [Endpoint contracts](#endpoint-contracts), [Fetch bridge and oRPC](#fetch-bridge-and-orpc) |
+| Observe request behavior | [Selection developer tools and observability](#developer-tools-and-observability), [HTTP request observability](#request-observability), [OpenTelemetry](#opentelemetry) |
 
-## 能力地图
+## Capability map
 
-| 范围 | 能力 |
+| Scope | Capabilities |
 | --- | --- |
-| HTTP 核心 | Axios 风格实例与 `AxiosHeaders`；JSON、文本、`Blob`、`ArrayBuffer`、`FormData`、`Response`；超时、取消、拦截器、状态和转换钩子 |
-| 网络控制 | 结构化重试与 `Retry-After`、GET TTL 缓存和请求去重、下载/上传进度、响应大小限制、并发/频率调度、分块上传 |
-| 服务与生态 | SSR `fetchJson`、SSE/NDJSON、端点契约、Fetch 桥接、Fastify 服务端集成、Nuxt 4/Nitro 接入、Node HTTP/2 与注入式 HTTP/3、TanStack Query |
-| Selection（可选） | 类型化字段契约、逐字段授权、查询预算、按需执行；分页、请求内批量加载、注册选择方案及观测扩展见下文 |
+| HTTP core | Axios-style instances and `AxiosHeaders`; JSON, text, `Blob`, `ArrayBuffer`, `FormData`, and `Response`; timeouts, cancellation, interceptors, status hooks, and transformation hooks |
+| Network control | Structured retries and `Retry-After`, GET TTL caching and request deduplication, download/upload progress, response size limits, concurrency/rate scheduling, and chunked uploads |
+| Services and ecosystems | SSR `fetchJson`, SSE/NDJSON, endpoint contracts, Fetch bridge, Fastify server integration, Nuxt 4/Nitro integration, Node HTTP/2 and injected HTTP/3, and TanStack Query |
+| Selection (optional) | Typed field contracts, per-field authorization, query budgets, and on-demand execution; see below for pagination, request-scoped batching, registered selection plans, and observability extensions |
 
-核心零运行时依赖，支持现代浏览器、Node.js 20+ 和提供标准 Web API 的 Bun。可选集成按入口导入；根入口不加载 Node 传输或可选的生态依赖。
+The core has zero runtime dependencies and supports modern browsers, Node.js 20+, and Bun environments that provide standard Web APIs. Import optional integrations through their own entry points; the root entry point does not load Node transports or optional ecosystem dependencies.
 
-## 安装
+## Installation
 
 ```bash
 pnpm add @nexusmc-cn/axnexus
 ```
 
-包仅以 ESM 发布，要求 Node.js >=20，使用 `import` 引入，并内置 TypeScript 类型声明。CommonJS 项目使用动态 `import()`；包没有 `require` 导出条件。发布包保留 `src`，供 JavaScript 和声明文件的 source map 定位源码；应用应使用下表中的公共入口。API 采用实例、拦截器和 `AxiosHeaders` 风格，便捷请求方法默认直接返回解析后的数据。
+The package is ESM-only, requires Node.js >=20, uses `import`, and includes TypeScript declarations. CommonJS projects must use dynamic `import()`; the package has no `require` export condition. Published packages retain `src` so that JavaScript and declaration source maps can locate the source; applications should use the public entry points listed below. The API uses instances, interceptors, and `AxiosHeaders`-style headers, and convenience request methods return parsed data directly by default.
 
-### 入口导航
+### Entry points
 
-| 入口 | 用途 |
+| Entry point | Purpose |
 | --- | --- |
-| `@nexusmc-cn/axnexus` | HTTP 客户端、headers、schema、缓存、上传和日志 |
-| `@nexusmc-cn/axnexus/stream` | [SSE/NDJSON 消费与 SSE 重连](#sse-和-ndjson) |
-| `@nexusmc-cn/axnexus/fetch` | [为 oRPC 等 SDK 提供 Fetch](#fetch-桥接与-orpc) |
-| `@nexusmc-cn/axnexus/contracts` | [端点契约与业务错误](#端点契约) |
-| `@nexusmc-cn/axnexus/selection` | [共享字段契约与选择客户端](#selection-选择协议) |
-| `@nexusmc-cn/axnexus/selection/server` | [Selection 服务端处理器](#selection-选择协议) |
-| `@nexusmc-cn/axnexus/fastify` | [可选 Fastify Selection 路由与 Web Request/Response 桥接](#fastify-服务端集成) |
-| `@nexusmc-cn/axnexus/plugins` | [插件和生命周期事件类型](#context-和插件) |
-| `@nexusmc-cn/axnexus/observability` | [请求日志及自动接入](#请求观测) |
-| `@nexusmc-cn/axnexus/opentelemetry` | [可选 OpenTelemetry 插件](#opentelemetry) |
-| `@nexusmc-cn/axnexus/tanstack-query` | [可选 TanStack Query options](#tanstack-query) |
-| `@nexusmc-cn/axnexus/node-http2`、`@nexusmc-cn/axnexus/node-http3` | [Node 传输](#http2-和-http3) |
+| `@nexusmc-cn/axnexus` | HTTP client, headers, schemas, caching, uploads, and logging |
+| `@nexusmc-cn/axnexus/stream` | [SSE/NDJSON consumption and SSE reconnection](#sse-and-ndjson) |
+| `@nexusmc-cn/axnexus/fetch` | [Provide Fetch for SDKs such as oRPC](#fetch-bridge-and-orpc) |
+| `@nexusmc-cn/axnexus/contracts` | [Endpoint contracts and business errors](#endpoint-contracts) |
+| `@nexusmc-cn/axnexus/selection` | [Shared field contracts and the selection client](#selection-protocol) |
+| `@nexusmc-cn/axnexus/selection/server` | [Selection server handler](#selection-protocol) |
+| `@nexusmc-cn/axnexus/fastify` | [Optional Fastify Selection routes and Web Request/Response bridge](#fastify-server-integration) |
+| `@nexusmc-cn/axnexus/plugins` | [Plugins and lifecycle event types](#context-and-plugins) |
+| `@nexusmc-cn/axnexus/observability` | [Request logging and automatic integration](#request-observability) |
+| `@nexusmc-cn/axnexus/opentelemetry` | [Optional OpenTelemetry plugin](#opentelemetry) |
+| `@nexusmc-cn/axnexus/tanstack-query` | [Optional TanStack Query options](#tanstack-query) |
+| `@nexusmc-cn/axnexus/node-http2`, `@nexusmc-cn/axnexus/node-http3` | [Node transports](#http2-and-http3) |
 
-只在使用 Fastify、OpenTelemetry、TanStack Query 或 oRPC 集成时安装相应依赖，见各节说明。
+Install the corresponding dependencies only when using the Fastify, OpenTelemetry, TanStack Query, or oRPC integrations. See their sections for details.
 
-## HTTP 快速开始
+## HTTP quick start
 
 ```typescript
 import { createHttpClient } from '@nexusmc-cn/axnexus';
@@ -71,23 +71,23 @@ const post = await http.post<{ id: string }, { title: string }>('/posts', {
 });
 ```
 
-默认凭据策略是 `same-origin`，自动添加 `Accept: application/json`，默认不生成 `X-Request-Id`。调用方显式传入同名请求头时会保留调用方的值。客户端或单次请求设置 `requestId: true` 可开启 ID，也可传入工厂函数；同一逻辑请求的重试复用同一 ID。
+The default credentials policy is `same-origin`. The client automatically adds `Accept: application/json` and does not generate `X-Request-Id` by default. Explicitly supplied headers with the same names retain the caller's values. Set `requestId: true` on the client or an individual request to enable IDs, or supply a factory function; retries of the same logical request reuse the same ID.
 
-跨源鉴权需要显式设置 `credentials: 'include'`，服务端须正确配置 CORS 和 `Access-Control-Allow-Credentials`。公开 API 可设置 `credentials: 'omit'`。升级到 `0.2.0` 时，依赖跨源 Cookie 或自动请求 ID 的调用方需要显式开启相应选项；其他兼容性变化见[变更记录](../CHANGELOG.md)。
+Cross-origin authentication requires an explicit `credentials: 'include'` setting, and the server must configure CORS and `Access-Control-Allow-Credentials` correctly. Public APIs can use `credentials: 'omit'`. When upgrading to `0.2.0`, callers that rely on cross-origin cookies or automatic request IDs must explicitly enable the relevant options; see the [changelog](../CHANGELOG.md) for other compatibility changes.
 
-`trace` 和 `connect` 便捷方法保留给支持相应方法的自定义 adapter。内置 Fetch（包括 Node Fetch）和 XHR 会在发送前抛出 `ERR_UNSUPPORTED_METHOD`，不会把它们当作网络故障重试。
+The `trace` and `connect` convenience methods are reserved for custom adapters that support those methods. Built-in Fetch (including Node Fetch) and XHR throw `ERR_UNSUPPORTED_METHOD` before sending the request and do not retry it as a network failure.
 
-## Selection 选择协议
+## Selection protocol
 
-Selection 是 axnexus 自有的可选 JSON 协议。客户端声明需要的字段，服务端按字段授权并执行；它不使用 GraphQL 查询语言。共享契约只放公开字段形状，服务端 resolver 和权限函数仅从 `/selection/server` 引入。部署时仍需配置同源/跨源访问、认证和 CSRF 策略。
+Selection is axnexus's own optional JSON protocol. The client declares the fields it needs, and the server authorizes and executes each field; it does not use the GraphQL query language. Shared contracts contain only public field shapes. Server resolvers and authorization functions are imported only from `/selection/server`. Deployment still requires same-origin/cross-origin access, authentication, and CSRF policies.
 
-如果一个端点的响应形状固定，继续使用普通 HTTP 请求或 [端点契约](#端点契约)。如果多个页面需要同一资源的不同字段组合，使用 Selection；业务身份与权限仍由服务端决定。
+For endpoints with a fixed response shape, continue using ordinary HTTP requests or [endpoint contracts](#endpoint-contracts). Use Selection when multiple pages need different combinations of fields from the same resource; the server still determines business identity and permissions.
 
-### 共享契约与客户端
+### Shared contract and client
 
-先定义资源参数和公开字段，客户端用 `select` 调用。同一个资源可供多个选择形状复用。
+First define the resource arguments and public fields, then call `select` from the client. Multiple selection shapes can reuse the same resource.
 
-`users-contract.ts` 只包含可以共享的资源定义：
+`users-contract.ts` contains only the resource definition that can be shared:
 
 ```typescript
 import { defineSelectionResource, leaf } from '@nexusmc-cn/axnexus/selection';
@@ -105,7 +105,7 @@ export const users = defineSelectionResource({
 });
 ```
 
-调用方再创建客户端：
+The caller then creates a client:
 
 ```typescript
 import { createHttpClient } from '@nexusmc-cn/axnexus';
@@ -120,7 +120,7 @@ const user = await selection.select(users, {
 // user: { id: string; name: string } | null
 ```
 
-这次选择对应的 JSON 请求为：
+This selection produces the following JSON request:
 
 ```json
 {
@@ -132,9 +132,9 @@ const user = await selection.select(users, {
 }
 ```
 
-### 服务端执行
+### Server execution
 
-服务端从独立模块导入共享契约，定义根加载器、字段读取和授权，再挂载 POST 路由：
+On the server, import the shared contract from a separate module, define the root loader, field resolvers, and authorization, then mount a POST route:
 
 ```typescript
 import { createSelectionHandler, implementSelection } from '@nexusmc-cn/axnexus/selection/server';
@@ -143,7 +143,7 @@ import { users } from './users-contract.js';
 declare function readUserName(id: string): Promise<string>;
 const server = implementSelection(users, {
   authorizeResource: ({ context }) => Boolean(context),
-  load: async ({ args }) => ({ id: args.id }), // 只载入字段授权所需的最小身份数据
+  load: async ({ args }) => ({ id: args.id }), // Load only the minimal identity data needed for field authorization
   fields: {
     id: { resolve: ({ parent }) => parent.id },
     name: { resolve: async ({ parent }) => readUserName(parent.id) },
@@ -153,27 +153,27 @@ const limits = {
   maxRequestBytes: 8192, maxDepth: 4, maxFields: 20, maxCost: 100, maxArrayLength: 50,
 };
 const handler = createSelectionHandler({ resources: [server], limits });
-// 框架路由 POST /__axnexus/select：return handler(request, authenticatedContext);
+// Framework route POST /__axnexus/select: return handler(request, authenticatedContext);
 ```
 
-### 协议与安全边界
+### Protocol and security boundaries
 
-协议使用 POST；成功体为 `{ data }`，失败体为 `{ error: { code, message } }`。一次请求选择一个资源，只读且无部分成功。服务端返回 `Cache-Control: no-store`。静态选择可精确推导返回字段，动态选择只得到保守的可选字段类型。资源和字段权限必须在相应读取前检查；根加载器不接收选择树，避免预读未授权字段。
+The protocol uses POST. Successful responses have a `{ data }` body; failures have `{ error: { code, message } }`. Each request selects one resource, is read-only, and allows no partial success. The server returns `Cache-Control: no-store`. Static selections infer the returned fields precisely; dynamic selections receive a conservative type with optional fields. Resource and field permissions must be checked before their respective reads. The root loader does not receive the selection tree, preventing it from preloading unauthorized fields.
 
-若叶子 schema 会把 resolver 值转换成另一种 JSON 形态，给 `leaf(schema, { wireSchema })` 配置校验转换后值的 schema；客户端用它校验服务器返回值。普通只校验、不转换的字段可省略。
+If a leaf schema transforms a resolver value into a different JSON shape, configure `leaf(schema, { wireSchema })` with a schema that validates the transformed value; the client uses it to validate the server's response. Fields that only validate without transforming can omit it.
 
-| 服务端限制 | 控制什么 |
+| Server limit | What it controls |
 | --- | --- |
-| `maxRequestBytes` | JSON 请求体大小，读取时即停止超限请求 |
-| `maxDepth`、`maxFields` | 选择树的层数与字段数量 |
-| `maxCost` | 按字段成本和数组上限估算的最坏情况预算 |
-| `maxArrayLength` | 数组最多可返回的条目数，也参与成本估算 |
+| `maxRequestBytes` | JSON request body size; reading stops as soon as the request exceeds the limit |
+| `maxDepth`, `maxFields` | Selection tree depth and field count |
+| `maxCost` | Worst-case budget estimated from field costs and array limits |
+| `maxArrayLength` | Maximum number of items an array can return; also used to estimate cost |
 
-请求体与选择树预算在资源读取前检查；实际数组长度在字段返回时再次检查。业务字段的 `cost` 可以在共享契约中显式配置。
+Request body and selection tree budgets are checked before reading the resource; actual array lengths are checked again when fields return. Business fields can explicitly configure their `cost` in the shared contract.
 
-### 有界分页
+### Bounded pagination
 
-列表资源通过资源参数接收 `first` 和 `after`。服务端用 `paginateSelection` 限制页大小、转换不透明游标并读取数据；客户端继续对返回的条目和分页元信息按需选字段。页大小上限由服务端配置，不信任客户端提交的 `first`。
+List resources receive `first` and `after` through their resource arguments. The server uses `paginateSelection` to limit page size, convert opaque cursors, and load data; the client continues to select fields from the returned items and pagination metadata as needed. The server configures the maximum page size and does not trust the client's submitted `first`.
 
 ```typescript
 import { paginateSelection } from '@nexusmc-cn/axnexus/selection/server';
@@ -185,7 +185,7 @@ declare const userStore: {
     Promise<readonly { id: string }[]>;
 };
 
-// 由资源的 load 调用；游标和稳定排序由业务数据源实现。
+// Call from the resource's load; the business data source implements cursors and stable ordering.
 const loadPage = (args: { first: number; after?: string }, signal: AbortSignal) =>
   paginateSelection(args, {
     maxPageSize: 50,
@@ -194,19 +194,19 @@ const loadPage = (args: { first: number; after?: string }, signal: AbortSignal) 
     load: ({ after, limit, signal }) => userStore.listAfterId({ after, limit, signal }),
     signal,
   });
-// loadPage 的结果是 { items, pageInfo: { endCursor, hasNextPage } }。
+// loadPage returns { items, pageInfo: { endCursor, hasNextPage } }.
 ```
 
-辅助函数向 `load` 传入 `limit = first + 1`，并拒绝超量结果；额外一条用于判断 `hasNextPage`。游标必须对应稳定且唯一的排序键，数据源须按同一顺序查询。将 `items` 和 `pageInfo` 定义为资源公开字段，`maxArrayLength` 至少应覆盖允许的最大页长。返回结构不包含总数。
+The helper passes `limit = first + 1` to `load` and rejects results that exceed this limit; the extra item determines `hasNextPage`. Cursors must correspond to stable, unique sort keys, and the data source must query in the same order. Define `items` and `pageInfo` as public resource fields, and set `maxArrayLength` to at least the maximum permitted page size. The returned structure does not include a total count.
 
-### 请求内批量加载
+### Request-scoped batch loading
 
-当列表中的多个条目需要读取关联数据时，使用 `createSelectionBatchLoader` 合并同一请求内的读取。通过处理器的 `createLoaders` 为每个请求创建 loader，resolver 从 `loaders` 取得它。工厂必须每次创建新 loader，不要返回跨请求共享的实例。
+When multiple items in a list need related data, use `createSelectionBatchLoader` to combine reads within the same request. Create a loader for every request through the handler's `createLoaders`, then access it through `loaders` in resolvers. The factory must create new loaders on every call; do not return instances shared across requests.
 
 ```typescript
 import { createSelectionBatchLoader, withSelectionLoaders } from '@nexusmc-cn/axnexus/selection/server';
 
-// 将这个工厂传给 createSelectionHandler({ ..., createLoaders })。
+// Pass this factory to createSelectionHandler({ ..., createLoaders }).
 const createLoaders = ({ context, signal }: {
   context: { accounts: { namesByIds(ids: readonly string[]): Promise<readonly string[]> } };
   signal: AbortSignal;
@@ -217,22 +217,22 @@ const createLoaders = ({ context, signal }: {
   ),
 });
 
-// 将工厂先绑定到实现器，让字段 resolver 的 loaders 自动推断类型：
+// Bind the factory to the implementer first so field resolvers infer their loaders' types:
 const scoped = withSelectionLoaders(createLoaders);
-// const server = scoped.implement(membersContract, { ...字段实现... });
+// const server = scoped.implement(membersContract, { ...field implementations... });
 // const handler = createSelectionHandler({ resources: [server], createLoaders: scoped.createLoaders, limits });
 
-// 对应的字段 resolver：
+// Corresponding field resolver:
 // accountName: { resolve: ({ parent, loaders }) => loaders.accounts.load(parent.accountId) }
 ```
 
-批量函数须按输入顺序返回等量结果。相同 key 在单次请求内可复用结果；不同请求各建一份 loader。服务端先检查同一字段对所有条目的权限，再并行读取该字段，以便收集多个 key。
+The batch function must return the same number of results in input order. Results for the same key can be reused within a single request; each request gets its own loaders. The server first checks permissions for the same field across all items, then reads that field concurrently so that multiple keys can be collected.
 
-### 已注册的选择方案
+### Registered selection plans
 
-固定页面或客户端可先用 `defineSelectionPlan` 给选择树命名，再通过客户端的 `execute` 按方案 ID 请求。服务端注册并校验这些方案；可以把动态选择留给需要它的调用方，同时为已知页面提供稳定的字段范围。方案 ID 必须带版本，以便字段调整时明确升级。
+For fixed pages or clients, use `defineSelectionPlan` to name a selection tree, then request it by plan ID through the client's `execute` method. The server registers and validates these plans. This lets you retain dynamic selections for callers that need them while giving known pages a stable set of fields. Plan IDs must include a version so that field changes require an explicit upgrade.
 
-共享的 `users-plan.ts`：
+Shared `users-plan.ts`:
 
 ```typescript
 import { defineSelectionPlan } from '@nexusmc-cn/axnexus/selection';
@@ -244,7 +244,7 @@ export const userSummary = defineSelectionPlan('users.summary.v1', users, {
 });
 ```
 
-客户端调用：
+Client call:
 
 ```typescript
 import { userSummary } from './users-plan.js';
@@ -252,7 +252,7 @@ import { userSummary } from './users-plan.js';
 const user = await selection.execute(userSummary, { args: { id: '42' } });
 ```
 
-`execute` 的请求体只发送方案 ID 和参数，服务端按已注册选择树执行。客户端和服务端应导入同一个方案定义。服务端用 `plans: [userSummary]` 注册；设置 `allowDynamic: false` 后只接受已注册方案，未注册 ID 返回 `UNKNOWN_PLAN`，普通动态选择请求返回 `DYNAMIC_SELECTION_DISABLED`：
+The `execute` request body sends only the plan ID and arguments; the server executes the registered selection tree. The client and server should import the same plan definition. Register plans on the server with `plans: [userSummary]`. With `allowDynamic: false`, the server accepts only registered plans: unregistered IDs return `UNKNOWN_PLAN`, and ordinary dynamic selection requests return `DYNAMIC_SELECTION_DISABLED`:
 
 ```typescript
 import { userSummary } from './users-plan.js';
@@ -265,9 +265,9 @@ const planOnlyHandler = createSelectionHandler({
 });
 ```
 
-### 开发工具与观测
+### Developer tools and observability
 
-`describeSelectionResource` 展示资源公开字段结构；`inspectSelection` 在发送前检查选择的结构与预算。处理器的 `observe` 钩子记录请求结果和执行统计，用于发现过深或代价过高的选择。
+`describeSelectionResource` describes a resource's public field structure; `inspectSelection` checks a selection's structure and budget before sending it. The handler's `observe` hook records request outcomes and execution statistics to help identify selections that are too deep or too expensive.
 
 ```typescript
 import { describeSelectionResource, inspectSelection } from '@nexusmc-cn/axnexus/selection';
@@ -279,17 +279,17 @@ const inspected = inspectSelection(users, { id: true, name: true }, {
 console.log(description.resource, inspected.metrics);
 ```
 
-`inspected.metrics` 包含 `fieldCount`、`depth`、`cost` 和字段 `paths`。在处理器中设置 `observe: (event) => logger.info(event)` 可记录请求模式（`dynamic`、`registered` 或 `invalid`）、状态、耗时、请求字节数与预算等元数据。回调不应记录资源参数、响应值或用户身份；观测回调失败不会改变协议响应。
+`inspected.metrics` contains `fieldCount`, `depth`, `cost`, and field `paths`. Configure `observe: (event) => logger.info(event)` on the handler to record metadata such as the request mode (`dynamic`, `registered`, or `invalid`), status, duration, request bytes, and budgets. Callbacks should not log resource arguments, response values, or user identities; an observability callback failure does not change the protocol response.
 
-### Fastify 服务端集成
+### Fastify server integration
 
-普通 axnexus HTTP 客户端可以直接调用 Fastify 的现有 REST 路由，无需插件。若服务端要提供 Selection，可选装 Fastify 5（`>=5.12.8 <6`），从独立入口挂载 Selection POST 路由。`/fastify` 不由根入口加载。
+The ordinary axnexus HTTP client can call existing Fastify REST routes directly, with no plugin. To serve Selection, optionally install Fastify 5 (`>=5.12.8 <6`) and mount a Selection POST route through the separate entry point. The root entry point does not load `/fastify`.
 
 ```bash
 pnpm add fastify@^5.12.8
 ```
 
-沿用上文的 `server` 资源实现和 `limits`，在服务端注册：
+Reuse the `server` resource implementation and `limits` above and register them on the server:
 
 ```typescript
 import Fastify, { type FastifyRequest } from 'fastify';
@@ -307,11 +307,11 @@ await app.register(createFastifySelectionPlugin({
 // POST /api/__axnexus/select
 ```
 
-`getContext` 从服务端已验证的会话或令牌建立上下文，供资源和字段授权使用。插件只注册该 Selection 路由，保留应用原有 REST、上传、流式及其他 Fastify 路由的处理方式。插件在自己的封装范围内为 Selection 读取原始 JSON 字节；业务路由的解析器不受影响。
+`getContext` builds context from a server-verified session or token for resource and field authorization. The plugin registers only this Selection route and preserves the application's handling of existing REST, upload, streaming, and other Fastify routes. It reads raw JSON bytes for Selection within its own encapsulation scope, leaving business-route parsers unaffected.
 
-`endpoint` 同时配置服务端处理器的内部路径和 Fastify 路由。例如插件传入 `endpoint: '/select/v1'` 且注册时传入 `{ prefix: '/api' }`，客户端应使用 `createSelectionClient(http, { endpoint: '/api/select/v1' })`。如果直接使用 `createSelectionHandler`，也应把它的 `endpoint` 与实际挂载路径对应起来。
+`endpoint` configures both the server handler's internal path and the Fastify route. For example, with `endpoint: '/select/v1'` on the plugin and `{ prefix: '/api' }` during registration, the client should use `createSelectionClient(http, { endpoint: '/api/select/v1' })`. When using `createSelectionHandler` directly, its `endpoint` should likewise match the actual mount path.
 
-对于应用中已有的 Web `Request`/`Response` 处理器，可以逐路由使用通用桥接：
+For existing Web `Request`/`Response` handlers in your application, use the general-purpose bridge on individual routes:
 
 ```typescript
 import { sendWebResponse, toWebRequest } from '@nexusmc-cn/axnexus/fastify';
@@ -324,13 +324,13 @@ app.get('/status', async (request, reply) => {
 });
 ```
 
-`toWebRequest` 保留方法、路径和请求头；传入当前 `reply` 时，响应未完成而客户端断开会取消 Web `Request.signal`。不传 `reply` 的请求不追踪连接取消。`sendWebResponse` 传递状态、响应头、多个 `Set-Cookie` 与响应流。`toWebRequest` 不把 Fastify 已解析的 JSON 或 multipart 对象重新序列化。桥接带请求体的路由时，应配置原始字节解析器，或显式传入 `toWebRequest(request, { reply, body: rawBytes })`；显式 `body` 只接受文本、字节或 Web 流，不接受已构造的 `FormData`、`URLSearchParams`、`Blob`。multipart 路由要传入原始请求字节及匹配的 `Content-Type`。需要覆盖来源或内部路径时，分别设置 `origin`、`path`。
+`toWebRequest` preserves the method, path, and request headers. When given the current `reply`, it aborts the Web `Request.signal` if the client disconnects before the response completes. Requests without `reply` do not track connection cancellation. `sendWebResponse` forwards the status, response headers, multiple `Set-Cookie` headers, and response stream. `toWebRequest` does not reserialize JSON or multipart objects already parsed by Fastify. When bridging routes with request bodies, configure a raw-byte parser or explicitly pass `toWebRequest(request, { reply, body: rawBytes })`. Explicit `body` values accept only text, bytes, or Web streams, not constructed `FormData`, `URLSearchParams`, or `Blob` objects. For multipart routes, pass the raw request bytes and a matching `Content-Type`. To override the origin or internal path, set `origin` or `path`, respectively.
 
-### Nuxt 4 与 Nitro
+### Nuxt 4 and Nitro
 
-axnexus 的普通 HTTP 客户端可请求 Nuxt/Nitro 已有的 REST 路由；Selection 服务端使用框架无关的 `createSelectionHandler`，不需要安装 `@nexusmc-cn/axnexus/fastify` 或新的 Nuxt 模块。以下示例分别以 Nuxt 4.5.2 和 4.6.3 验证，项目仍须满足所用 Nuxt 版本的 Node 要求（4.5.2 为 `^22.19.0 || ^24.11.0 || >=26`，4.6.3 为 `^22.22.3 || ^24.15.0 || >=26`）。两种写法使用同一个 `server` 资源实现和 `limits`；`authenticate` 是应用自己的会话或令牌验证函数。
+The ordinary axnexus HTTP client can call existing Nuxt/Nitro REST routes. The Selection server uses the framework-independent `createSelectionHandler`, with no need to install `@nexusmc-cn/axnexus/fastify` or a new Nuxt module. The examples below were verified with Nuxt 4.5.2 and 4.6.3, respectively. Projects must still satisfy their Nuxt version's Node requirements (`^22.19.0 || ^24.11.0 || >=26` for 4.5.2; `^22.22.3 || ^24.15.0 || >=26` for 4.6.3). Both approaches use the same `server` resource implementation and `limits`; `authenticate` is the application's own session or token verification function.
 
-**Nuxt 4.6+：** 在 `server/api/__axnexus/select.post.ts` 中使用 `nuxt/server` 的 Web Request/Response 接口：
+**Nuxt 4.6+:** Use the Web Request/Response interface from `nuxt/server` in `server/api/__axnexus/select.post.ts`:
 
 ```typescript
 import { defineEventHandler } from 'nuxt/server';
@@ -346,7 +346,7 @@ export default defineEventHandler(async (event) =>
   handler(event.req, { principal: await authenticate(event.req) }));
 ```
 
-**Nuxt 4.5：** 同一路由用 H3 v1 转换请求和响应。示例直接导入 `h3`，使用 pnpm 的应用应显式安装 `h3@1.15.11`（消费测试所用版本）；`toWebRequest` 在 H3 v1 中仍标注为不稳定，因此建议固定已验证的 Nuxt/H3 版本：
+**Nuxt 4.5:** Use H3 v1 to convert requests and responses in the same route. The example imports `h3` directly, so applications using pnpm should explicitly install `h3@1.15.11` (the version used in consumer tests). H3 v1 still marks `toWebRequest` as unstable, so pinning verified Nuxt/H3 versions is recommended:
 
 ```typescript
 import { defineEventHandler, sendWebResponse, toWebRequest } from 'h3';
@@ -365,9 +365,9 @@ export default defineEventHandler(async (event) => {
 });
 ```
 
-`server/api/...` 自动带 `/api` 前缀，所以两个服务端处理器和客户端都应使用 `/api/__axnexus/select`；如果改放在 `server/routes/__axnexus/select.post.ts`，路径则是 `/__axnexus/select`。身份必须从已验证的服务端上下文取得，不能相信请求体里的身份字段。Nuxt 应用仍负责 CORS、CSRF、会话校验与自己的认证钩子；Selection 处理器只负责协议、预算及资源和字段授权。
+`server/api/...` automatically adds the `/api` prefix, so both server handlers and the client should use `/api/__axnexus/select`. If the file moves to `server/routes/__axnexus/select.post.ts`, the path becomes `/__axnexus/select`. Identity must come from verified server context; do not trust identity fields in the request body. The Nuxt application remains responsible for CORS, CSRF, session validation, and its own authentication hooks; the Selection handler is responsible only for the protocol, budgets, and resource and field authorization.
 
-Nuxt SSR 中，不要把含有 Cookie、租户或用户缓存的 axnexus 客户端放在进程级单例。每个请求单独创建客户端，内部路由使用当前请求事件的 `fetch`；传入的 Fetch `Headers` 先转为普通对象，以兼容 H3 v1 对请求头的处理。以下写法可放在页面的 `<script setup lang="ts">` 中，`users` 是上文的共享资源契约：
+In Nuxt SSR, do not place an axnexus client containing cookies, tenant caches, or user caches in a process-wide singleton. Create a client for each request and use the current request event's `fetch` for internal routes. Convert incoming Fetch `Headers` to a plain object first for compatibility with H3 v1's header handling. The following can be placed in a page's `<script setup lang="ts">`; `users` is the shared resource contract defined above:
 
 ```typescript
 import { createFetchAdapter, createHttpClient } from '@nexusmc-cn/axnexus';
@@ -401,7 +401,7 @@ const { data } = await useAsyncData('user-42', async () => {
 });
 ```
 
-`useAsyncData` 负责 SSR payload 与客户端水合，数据 key 应与资源及参数对应；登录、退出或切换用户后应失效相关 key。普通 REST 请求也可使用 axnexus；只需要 Nuxt 原生数据获取功能时，直接使用 `useFetch` 即可。裸 `$fetch` 在 SSR 中不会自动转发当前用户 Cookie，不能代替请求作用域内的身份头处理。
+`useAsyncData` handles the SSR payload and client hydration. Data keys should correspond to the resource and arguments; invalidate the relevant keys after login, logout, or switching users. You can also use axnexus for ordinary REST requests; if you only need Nuxt's native data fetching, use `useFetch` directly. Bare `$fetch` does not automatically forward the current user's cookies during SSR and cannot replace request-scoped identity header handling.
 
 ## Headers
 
@@ -414,11 +414,11 @@ headers.set('X-Trace-Id', 'trace-1');
 console.log(headers.get('authorization'));
 ```
 
-`AxiosHeaders.from(value)` 会复用已有的 `AxiosHeaders`，或把原生 `Headers`、`Map`/其他可迭代键值对、普通对象转换成统一实例；需要交给 Fetch/XHR 时调用 `headers.toHeaders()`。`false` 是显式禁用该 header 的哨兵值（例如 `Content-Type: false`），`null`/`undefined` 则表示不发送。这样可以明确区分业务层的可变 headers 和 adapter 使用的原生 `Headers`。
+`AxiosHeaders.from(value)` reuses an existing `AxiosHeaders` instance or converts native `Headers`, a `Map` or other iterable of key-value pairs, or a plain object into a consistent instance. Call `headers.toHeaders()` when passing headers to Fetch/XHR. `false` is a sentinel that explicitly disables a header (for example, `Content-Type: false`); `null` and `undefined` mean the header is not sent. This keeps mutable application headers distinct from the native `Headers` used by adapters.
 
-请求配置的 `headers` 可以包含 `common` 和按 method 分组的默认值；合并顺序是客户端默认值、`common`、当前 method、请求级值，后者优先且不会产生大小写重复键。
+The request configuration's `headers` can contain `common` defaults and defaults grouped by method. They are merged in this order: client defaults, `common`, the current method, and request-level values. Later values take precedence without creating duplicate keys that differ only in case.
 
-## 请求配置
+## Request configuration
 
 ```typescript
 const result = await http.get('/items', {
@@ -434,17 +434,17 @@ const result = await http.get('/items', {
 });
 ```
 
-`params` 使用 `URLSearchParams` 编码，数组会生成重复的 query key，`null` 和 `undefined` 会被跳过。相对路径会与 `baseURL` 合并；如果不允许绝对 URL，可以设置 `allowAbsoluteURL: false`。URL 和 `baseURL` 中的控制字符会被拒绝，避免 TAB、换行等字符经浏览器规范化后绕过地址策略。
+`params` are encoded with `URLSearchParams`: arrays produce repeated query keys, while `null` and `undefined` are skipped. Relative paths are resolved against `baseURL`; set `allowAbsoluteURL: false` to disallow absolute URLs. Control characters in the URL or `baseURL` are rejected so that characters such as tabs and newlines cannot bypass address policies through browser normalization.
 
-客户端缓存使用 `cache: { ttl }` 或 `cache: false`；如果需要把原生 Fetch 的缓存模式传给 adapter，请使用 `fetchCache`（或等价的 `requestCache`），例如 `fetchCache: 'no-store'`。`dispatcher` 和 `agent` 只在 Node 运行时透传；`duplex`、`priority` 和 `window` 按运行环境支持情况使用。`ReadableStream` 请求体会自动设置 `duplex: 'half'`，Bun 的专有 Fetch 选项不会自动混入通用配置。
+Use `cache: { ttl }` or `cache: false` for the client cache. To pass a native Fetch cache mode to the adapter, use `fetchCache` (or its equivalent, `requestCache`), for example, `fetchCache: 'no-store'`. `dispatcher` and `agent` are forwarded only in Node runtimes; `duplex`, `priority`, and `window` depend on runtime support. `ReadableStream` request bodies automatically set `duplex: 'half'`. Bun-specific Fetch options are not automatically mixed into the shared configuration.
 
-普通对象、数组、数字、布尔值和 `null` 会自动 JSON 序列化。字符串、`FormData`、`Blob`、`ArrayBuffer`、`URLSearchParams` 和其他 `BodyInit` 会原样传递。
+Plain objects, arrays, numbers, booleans, and `null` are automatically serialized as JSON. Strings, `FormData`, `Blob`, `ArrayBuffer`, `URLSearchParams`, and other `BodyInit` values are passed through unchanged.
 
-### 状态、超时和转换
+### Status, timeouts, and transforms
 
 ```typescript
 const result = await http.get('/jobs/123', {
-  // 仅把 500 以上视为错误，404 会正常返回
+  // Treat only statuses of 500 or higher as errors; 404 returns normally.
   validateStatus: (status) => status < 500,
   totalTimeout: 30_000,
   parseJson: (text) => JSON.parse(text, reviveDates),
@@ -452,15 +452,15 @@ const result = await http.get('/jobs/123', {
 });
 ```
 
-除 `responseType: 'response'` 外，`204`、`205`、`304`、`HEAD` 和空响应体返回 `null`；JSON 或文本模式下，只有空白字符的响应也返回 `null`。`responseType: 'text'` 保留非空文本原样，`blob` 返回带响应 `Content-Type` 的 Blob，`arrayBuffer` 返回对应二进制值。HEAD 的 `Content-Length` 描述对应 GET 资源的大小，不作为实际下载字节或响应体大小处理。
+Except with `responseType: 'response'`, `204`, `205`, `304`, `HEAD`, and empty response bodies return `null`; whitespace-only responses also return `null` in JSON or text mode. `responseType: 'text'` preserves nonempty text unchanged, `blob` returns a Blob with the response's `Content-Type`, and `arrayBuffer` returns the corresponding binary value. A HEAD response's `Content-Length` describes the corresponding GET resource's size; it is not treated as actual downloaded bytes or response body size.
 
-客户端和 `fetchJson` 都接受可选的 Standard Schema 校验器：解析后执行 `schema['~standard'].validate()`，校验失败抛出 `ERR_SCHEMA_VALIDATION`。客户端在校验通过后才运行 `transformResponse`；无需绑定 Zod、Valibot 等具体库。空响应跳过校验，JSON `null` 则仍然校验；校验器返回带 `issues` 的结果（包括空数组）都视为失败。
+Both the client and `fetchJson` accept an optional Standard Schema validator: after parsing, they call `schema['~standard'].validate()` and throw `ERR_SCHEMA_VALIDATION` if validation fails. The client runs `transformResponse` only after validation succeeds, without depending on a specific library such as Zod or Valibot. Empty responses skip validation, but JSON `null` is still validated. Any validator result containing `issues`, including an empty array, is treated as a failure.
 
-### Schema 与类型推导
+### Schema and type inference
 
-配置 `schema` 后移除手填的响应 `<T>`，由 schema 的输出推导类型；`get`、`request`、完整响应方法、`fetchJson` 和 `fetchJsonResult` 遵守同一规则。无响应体仍可能得到 `null`，因此推导包含 `null`。未配置 schema 的调用保留原有显式泛型 API。
+When configuring `schema`, omit the explicit response `<T>` and let the schema's output determine the type. `get`, `request`, complete-response methods, `fetchJson`, and `fetchJsonResult` follow the same rule. A response without a body can still yield `null`, so the inferred type includes `null`. Calls without a schema retain the existing explicit generic API.
 
-可以直接使用兼容 Standard Schema v1 的库，也可以手写校验器。`StandardSchema<Output, Input>` 保留输出泛型在前的顺序，`version`、`vendor` 和 `types` 对旧式手写校验器可省略；成功结果必须包含 `value`，失败结果包含 `issues`。
+You can use a library compatible with Standard Schema v1 or write a validator yourself. `StandardSchema<Output, Input>` keeps the output generic first. Legacy handwritten validators may omit `version`, `vendor`, and `types`; a successful result must contain `value`, and a failed result contains `issues`.
 
 ```typescript
 import { createHttpClient, fetchJson, type StandardSchema } from '@nexusmc-cn/axnexus';
@@ -476,7 +476,7 @@ const userSchema: StandardSchema<User, User> = {
         && 'name' in value && typeof value.name === 'string') {
         return { value: { id: value.id, name: value.name } };
       }
-      return { issues: [{ message: '需要用户对象' }] };
+      return { issues: [{ message: 'Expected a user object' }] };
     },
   },
 };
@@ -490,17 +490,17 @@ const transformed = await validatedHttp.get('/users/me', {
 }); // unknown
 ```
 
-schema 先校验，再执行响应转换。客户端默认或单次请求配置了 `transformResponse` 时，最终结果保守推导为 `unknown`；需要使用转换结果时再缩窄类型。`InferSchemaInput` 和 `InferSchemaOutput` 可用于提取 schema 两端的类型。下文沿用此处的 `userSchema`。
+Schema validation runs before response transformation. When `transformResponse` is configured in client defaults or for an individual request, the final result is conservatively inferred as `unknown`; narrow the type before using the transformed result. `InferSchemaInput` and `InferSchemaOutput` extract a schema's input and output types. Later examples reuse the `userSchema` defined here.
 
-JSON（包括自定义 `parseJson`）解析失败抛出 `ERR_BAD_PAYLOAD`，`transformResponse` 失败抛出 `ERR_TRANSFORM_RESPONSE`。错误状态的 payload 会按文本读取后尝试 JSON 解析，超过 `maxBodySize` 时置为 `null`，原始 HTTP 状态错误仍保留。被丢弃或未读完的响应体会主动取消，以释放连接。
+JSON parsing failures, including those from a custom `parseJson`, throw `ERR_BAD_PAYLOAD`; `transformResponse` failures throw `ERR_TRANSFORM_RESPONSE`. Payloads for error statuses are read as text and then parsed as JSON if possible. If they exceed `maxBodySize`, they are set to `null` while preserving the original HTTP status error. Discarded or partially read response bodies are actively canceled to release the connection.
 
-`validateStatus` 或 `throwHttpErrors` 回调自身抛错时返回 `ERR_INVALID_STATUS_POLICY`，并且不会当作可重试的网络错误重发请求。
+If a `validateStatus` or `throwHttpErrors` callback itself throws, the request fails with `ERR_INVALID_STATUS_POLICY` and is not resent as a retryable network error.
 
-`maxBodySize` 以字节为单位，仅省略或 `undefined` 表示不限制；显式值必须是非负安全整数，`0` 只允许空体，负数、小数、`NaN`、`Infinity`、`null` 和非数字值抛出 `ERR_INVALID_CONFIG`。可读流按块累计，超限后立即取消底层响应体；没有可读流时只能在运行时缓冲后检查。Fetch 已解压的响应按解压后的实际字节限制，不用压缩 `Content-Length` 误判；原始传输按其暴露的字节限制。HEAD 与 `204`/`205`/`304` 不按声明长度计算。`responseType: 'response'` 保留 `url`、`redirected` 和 `type` 等 metadata。
+`maxBodySize` is measured in bytes. Only omission or `undefined` means unlimited; an explicit value must be a nonnegative safe integer. `0` allows only an empty body. Negative numbers, fractions, `NaN`, `Infinity`, `null`, and nonnumeric values throw `ERR_INVALID_CONFIG`. Readable streams are counted chunk by chunk, and the underlying response body is canceled immediately when the limit is exceeded. Without a readable stream, the size can only be checked after the runtime buffers the body. Responses decompressed by Fetch are limited by their actual decompressed bytes, rather than incorrectly using the compressed `Content-Length`; raw transports use the bytes they expose. HEAD and `204`/`205`/`304` responses are not counted by their declared length. `responseType: 'response'` preserves metadata such as `url`, `redirected`, and `type`.
 
-`timeout`、`totalTimeout` 和重试次数也会校验显式配置；超时必须是非负安全整数，`0` 表示关闭，重试次数必须是非负安全整数。延迟、最大延迟及延迟回调结果必须是有限非负数，且不超过 `Number.MAX_SAFE_INTEGER`。非法配置抛出 `ERR_INVALID_CONFIG`，不按网络错误重试；超过单个 timer 上限的合法等待会分段调度。
+Explicit `timeout`, `totalTimeout`, and retry counts are also validated. Timeouts must be nonnegative safe integers, with `0` disabling the timeout; retry counts must be nonnegative safe integers. Delays, maximum delays, and delay callback results must be finite nonnegative numbers no greater than `Number.MAX_SAFE_INTEGER`. Invalid configuration throws `ERR_INVALID_CONFIG` and is not retried as a network error. Valid waits exceeding a single timer's limit are scheduled in segments.
 
-`transformRequest` 和 `stringifyJson` 可用于接入自定义序列化协议，任一请求转换或序列化钩子失败都会抛出 `ERR_TRANSFORM_REQUEST`。
+Use `transformRequest` and `stringifyJson` to integrate a custom serialization protocol. A failure in any request transform or serialization hook throws `ERR_TRANSFORM_REQUEST`.
 
 ## FormData
 
@@ -512,11 +512,11 @@ form.set('purpose', 'content');
 const uploaded = await http.post<{ url: string }>('/upload', form);
 ```
 
-客户端不会为 `FormData` 手动设置 `Content-Type`，浏览器会自动补充 multipart boundary。
+The client does not manually set `Content-Type` for `FormData`; the browser adds the multipart boundary automatically.
 
-## 进度和限速
+## Progress and rate limiting
 
-下载进度在 Fetch response body 可读时逐块报告；上传进度需要显式选择 XHR adapter：
+Download progress is reported chunk by chunk when the Fetch response body is readable. Upload progress requires explicitly selecting the XHR adapter:
 
 ```typescript
 import { createHttpClient, xhrAdapter } from '@nexusmc-cn/axnexus';
@@ -542,37 +542,37 @@ await http.get('/large-file', {
 });
 ```
 
-`RateLimiter` 也可以单独使用。限速等待可被 `AbortSignal` 取消；队列超时会抛出 `ERR_RATE_LIMIT_QUEUE_TIMEOUT`。默认 Fetch adapter 不伪造上传进度，因为标准 Fetch 没有跨环境一致的请求体进度事件；XHR 的原生进度事件可用于上传/下载进度，但浏览器 XHR 不提供可靠的字节级发送节流，因此 `bytesPerSecond` 只在 Fetch、Node HTTP/2 和由 transport 实现的 HTTP/3 路径上作用于传输过程。
+`RateLimiter` can also be used independently. `AbortSignal` can cancel rate-limit waits; a queue timeout throws `ERR_RATE_LIMIT_QUEUE_TIMEOUT`. The default Fetch adapter does not simulate upload progress because standard Fetch has no consistent cross-runtime request-body progress events. Native XHR progress events support upload and download progress, but browser XHR does not provide reliable byte-level send throttling. As a result, `bytesPerSecond` throttles the transfer itself only for Fetch, Node HTTP/2, and HTTP/3 implemented by a transport.
 
-## 完整响应
+## Complete responses
 
-便捷方法默认只返回 `data`，需要状态码、headers、协议和 timings 时使用 response 方法：
+Convenience methods return only `data` by default. Use a response method when you need the status code, headers, protocol, and timings:
 
 ```typescript
 const response = await http.getResponse<{ id: string }>('/users/me');
 console.log(response.data, response.status, response.protocol, response.timings.duration);
 ```
 
-可用方法为 `requestResponse`、`getResponse`、`headResponse`、`optionsResponse`、`traceResponse`、`connectResponse`、`postResponse`、`putResponse`、`patchResponse` 和 `deleteResponse`。完整响应不会进入 GET data cache；`responseType: 'response'` 在普通方法中仍返回原始 `Response`。
+The available methods are `requestResponse`, `getResponse`, `headResponse`, `optionsResponse`, `traceResponse`, `connectResponse`, `postResponse`, `putResponse`, `patchResponse`, and `deleteResponse`. Complete responses do not enter the GET data cache. With regular methods, `responseType: 'response'` still returns the raw `Response`.
 
-返回原始 `Response` 时，调用方应读完或取消响应体，以释放连接；请求的取消、超时和传输资源清理会延续到响应体读取结束、失败或被取消。
+When receiving a raw `Response`, the caller should consume or cancel its body to release the connection. Request cancellation, timeouts, and transport cleanup remain active until reading the response body completes, fails, or is canceled.
 
-### API 签名速查
+### API signature reference
 
-下表展示未配置 schema 的显式泛型调用；配置 schema 后使用[自动类型推导](#schema-与类型推导)。
+The following table shows calls with explicit generics and no schema. When a schema is configured, use [automatic type inference](#schema-and-type-inference).
 
-| API | 签名 |
+| API | Signature |
 | --- | --- |
-| 创建实例 | `createHttpClient(config?: HttpClientConfig): HttpClient` |
-| 通用请求 | `request<T>(config)` 或 `request<T>(url, config?): Promise<T>` |
-| 完整响应 | `requestResponse<T>(config)` 或 `requestResponse<T>(url, config?): Promise<HttpResponse<T>>` |
-| 便捷方法 | `get/head/options/trace/connect<T>(url, config?)`、`delete<T>(url, config?)` |
-| 带请求体方法 | `post<T, B>(url, data?, config?)`、`put<T, B>(...)`、`patch<T, B>(...)` |
-| 完整响应便捷方法 | `getResponse`、`headResponse`、`optionsResponse`、`traceResponse`、`connectResponse`、`postResponse`、`putResponse`、`patchResponse`、`deleteResponse` |
+| Create a client | `createHttpClient(config?: HttpClientConfig): HttpClient` |
+| General request | `request<T>(config)` or `request<T>(url, config?): Promise<T>` |
+| Complete response | `requestResponse<T>(config)` or `requestResponse<T>(url, config?): Promise<HttpResponse<T>>` |
+| Convenience methods | `get/head/options/trace/connect<T>(url, config?)`, `delete<T>(url, config?)` |
+| Methods with a request body | `post<T, B>(url, data?, config?)`, `put<T, B>(...)`, `patch<T, B>(...)` |
+| Complete-response convenience methods | `getResponse`, `headResponse`, `optionsResponse`, `traceResponse`, `connectResponse`, `postResponse`, `putResponse`, `patchResponse`, `deleteResponse` |
 
-完整字段类型以包导出的 `RequestConfig`、`HttpClientConfig`、`HttpResponse` 和 `HttpError` 为准。
+Refer to the package's exported `RequestConfig`, `HttpClientConfig`, `HttpResponse`, and `HttpError` for the complete field types.
 
-## 错误处理
+## Error handling
 
 ```typescript
 import { isHttpError } from '@nexusmc-cn/axnexus';
@@ -587,28 +587,28 @@ try {
 }
 ```
 
-`HttpError.code` 可能是：
+Possible `HttpError.code` values:
 
-| Code | 含义 |
+| Code | Meaning |
 | --- | --- |
-| `ERR_BAD_RESPONSE` | HTTP 状态不满足状态策略，默认是非 2xx 状态 |
-| `ERR_NETWORK` | 网络层失败 |
-| `ETIMEDOUT` | 请求超过超时时间 |
-| `ERR_CANCELED` | 外部 `AbortSignal` 取消 |
-| `ERR_BAD_PAYLOAD` | 成功响应无法解析为 JSON |
-| `ERR_TRANSFORM_REQUEST` | 请求转换钩子抛出异常 |
-| `ERR_TRANSFORM_RESPONSE` | 响应转换钩子抛出异常 |
-| `ERR_SCHEMA_VALIDATION` | 响应未通过 Standard Schema 校验 |
-| `ERR_INVALID_HEADER` | header 名称或值包含非法字符 |
-| `ERR_INVALID_CONFIG` | 显式传入的配置值或 URL 无效 |
-| `ERR_INVALID_STATUS_POLICY` | 状态策略回调抛出异常 |
-| `ERR_MAX_BODY_SIZE` | 响应体超过 `maxBodySize` |
-| `ERR_RATE_LIMIT_QUEUE_TIMEOUT` | 请求在限速队列中超时 |
-| `ERR_UNSUPPORTED_ADAPTER` | 当前环境不支持所选 adapter |
-| `ERR_UNSUPPORTED_METHOD` | 所选 adapter 不支持该 HTTP 方法 |
-| `ERR_PROTOCOL_NEGOTIATION` | transport 无法协商请求的协议 |
+| `ERR_BAD_RESPONSE` | The HTTP status does not satisfy the status policy; by default, any non-2xx status |
+| `ERR_NETWORK` | Network-layer failure |
+| `ETIMEDOUT` | The request exceeded its timeout |
+| `ERR_CANCELED` | Cancellation by an external `AbortSignal` |
+| `ERR_BAD_PAYLOAD` | A successful response could not be parsed as JSON |
+| `ERR_TRANSFORM_REQUEST` | A request transform hook threw an exception |
+| `ERR_TRANSFORM_RESPONSE` | A response transform hook threw an exception |
+| `ERR_SCHEMA_VALIDATION` | The response failed Standard Schema validation |
+| `ERR_INVALID_HEADER` | A header name or value contains invalid characters |
+| `ERR_INVALID_CONFIG` | An explicitly supplied configuration value or URL is invalid |
+| `ERR_INVALID_STATUS_POLICY` | A status-policy callback threw an exception |
+| `ERR_MAX_BODY_SIZE` | The response body exceeds `maxBodySize` |
+| `ERR_RATE_LIMIT_QUEUE_TIMEOUT` | The request timed out in the rate-limit queue |
+| `ERR_UNSUPPORTED_ADAPTER` | The selected adapter is unsupported in the current environment |
+| `ERR_UNSUPPORTED_METHOD` | The selected adapter does not support the HTTP method |
+| `ERR_PROTOCOL_NEGOTIATION` | The transport could not negotiate the requested protocol |
 
-响应 schema 校验失败的 `HttpError` 保留可用的 `status` 和 `response`，其 `cause` 为 `SchemaValidationError`，通过只读 `issues` 读取每项的 `message` 和可选 `path`：
+An `HttpError` caused by response schema validation preserves the available `status` and `response`. Its `cause` is a `SchemaValidationError`; use the read-only `issues` to inspect each issue's `message` and optional `path`:
 
 ```typescript
 import { isHttpError, isSchemaValidationError } from '@nexusmc-cn/axnexus';
@@ -622,9 +622,9 @@ try {
 }
 ```
 
-`isHttpError` / `instanceof HttpError` 和 `isSchemaValidationError` / `instanceof SchemaValidationError` 能识别同一全局运行环境中同版本的重复模块实例，保留错误分类、响应、取消和超时信息；不保证跨版本、跨进程或跨 realm 的识别。普通同名或同形对象不会被当作 axnexus 错误。
+`isHttpError` / `instanceof HttpError` and `isSchemaValidationError` / `instanceof SchemaValidationError` recognize duplicate module instances of the same version within the same global runtime, preserving error classification, response, cancellation, and timeout information. Recognition across versions, processes, or realms is not guaranteed. Ordinary objects with the same name or shape are not treated as axnexus errors.
 
-## 取消和超时
+## Cancellation and timeouts
 
 ```typescript
 const controller = new AbortController();
@@ -637,15 +637,15 @@ controller.abort();
 await pending;
 ```
 
-`timeout` 约束单次 adapter 尝试，包括响应体读取和响应拦截器等待；`totalTimeout` 从进入公开请求方法时开始计时，覆盖首次异步请求拦截器、`transformRequest`、排队、重试判断、退避等待以及所有尝试。总预算由调用时的请求配置或客户端默认值确定，拦截器不会重新启动这份预算。二者超时都会抛出 `ETIMEDOUT`。超时或取消后才返回的 adapter 响应会被主动释放。
+`timeout` bounds a single adapter attempt, including response body reading and waits for response interceptors. `totalTimeout` starts when the public request method is entered and covers the first asynchronous request interceptor, `transformRequest`, queuing, retry decisions, backoff waits, and every attempt. The total budget is determined by the request configuration or client defaults at call time; interceptors do not restart it. Either timeout throws `ETIMEDOUT`. Adapter responses that arrive after timeout or cancellation are actively released.
 
-超时、退避、限速等待和分块重试使用分段计时，超过运行时 32 位计时器范围的等待不会溢出为立即执行；相对等待使用单调时钟，不受系统时间回拨影响。
+Timeouts, backoff, rate-limit waits, and chunk retries use segmented timers, so waits beyond the runtime's 32-bit timer range do not overflow into immediate execution. Relative waits use a monotonic clock and are unaffected by backward system-clock adjustments.
 
-外部取消会抛出 `ERR_CANCELED`，并会尽早结束仍在等待的请求拦截器、请求转换器、限速排队、adapter、响应体读取和响应拦截器。单次超时与外部取消竞争时，以先触发者为准；总超时计时器已经触发时返回 `ETIMEDOUT`。取消请求不会自动重试。自定义 adapter 和异步回调仍需主动响应 signal，才能停止已经开始的底层操作。
+External cancellation throws `ERR_CANCELED` and ends pending waits for request interceptors, request transforms, rate-limit queues, adapters, response body reading, and response interceptors as early as possible. When a per-attempt timeout races with external cancellation, whichever fires first takes precedence; if the total timeout timer has already fired, the result is `ETIMEDOUT`. Canceled requests are not automatically retried. Custom adapters and asynchronous callbacks must still respond to the signal themselves to stop underlying operations that have already started.
 
-## 重试
+## Retry
 
-默认不重试；设置 `retry` 后，默认重试状态码是 `408`、`429`、`500`、`502`、`503` 和 `504`，允许的方法是 GET、HEAD、OPTIONS 和 TRACE。POST、PUT、PATCH、DELETE 默认不自动重试。
+Requests are not retried by default. When `retry` is configured, the default retry statuses are `408`, `429`, `500`, `502`, `503`, and `504`, and the allowed methods are GET, HEAD, OPTIONS, and TRACE. POST, PUT, PATCH, and DELETE are not automatically retried by default.
 
 ```typescript
 const created = await http.post('/jobs', payload, {
@@ -655,17 +655,17 @@ const created = await http.post('/jobs', payload, {
 });
 ```
 
-网络错误和单次超时会遵循同一套重试次数配置，取消不会重试。请求级 `retry` 对象会继承客户端级对象，只有显式提供的字段会覆盖默认值；请求级数字只覆盖 `limit`，不会丢弃客户端的状态码、方法和退避设置。退避优先级为请求级 `retryDelay`、客户端级 `retryDelay`、`retry.delay`，数字延迟按第几个重试尝试线性累加，函数参数 `attempt` 从 `1` 开始；`shouldRetry` 和 `beforeRetry` 收到的 `RetryContext.delay` 是应用 `Retry-After`、`maxDelay` 和抖动后的最终值。`validateStatus` 优先于 `throwHttpErrors`；被 `validateStatus` 接受或被 `throwHttpErrors: false` 接受的状态不会生成 `ERR_BAD_RESPONSE`，也不会触发状态重试。
+Network errors and per-attempt timeouts follow the same retry-count configuration; cancellations are not retried. A request-level `retry` object inherits from the client-level object, overriding only explicitly supplied fields. A request-level number overrides only `limit`, preserving the client's status, method, and backoff settings. Backoff precedence is request-level `retryDelay`, client-level `retryDelay`, then `retry.delay`. A numeric delay increases linearly with the retry attempt number; the function argument `attempt` starts at `1`. The `RetryContext.delay` received by `shouldRetry` and `beforeRetry` is the final value after applying `Retry-After`, `maxDelay`, and jitter. `validateStatus` takes precedence over `throwHttpErrors`; statuses accepted by `validateStatus` or `throwHttpErrors: false` do not produce `ERR_BAD_RESPONSE` or trigger status-based retries.
 
-状态码策略的优先级是请求级 `retryOn`、请求级 `retry.statusCodes`、客户端级 `retryOn`、客户端级 `retry.statusCodes`，最后才是内置默认值；建议同一层只使用一种写法。默认 `respectRetryAfter: true`：有效的 `Retry-After` 会覆盖本地退避，之后 `maxDelay` 仍是最终上限，抖动也不会突破它；设为 `false` 才会忽略服务端退避。
+Status-code policy precedence is request-level `retryOn`, request-level `retry.statusCodes`, client-level `retryOn`, client-level `retry.statusCodes`, and finally the built-in defaults. Prefer one form at each level. `respectRetryAfter` defaults to `true`: a valid `Retry-After` overrides local backoff, after which `maxDelay` remains the final cap, including jitter. Set it to `false` to ignore server-specified backoff.
 
-`retry.errorCodes` 非空时是一份白名单，只有其中的错误码会按方法和次数策略重试，`ERR_NETWORK` 和超时也不会例外；未提供或为空时按默认错误策略处理。白名单可以覆盖错误默认的 `retryable: false`。默认策略不会重试本地状态回调抛出的 `ERR_INVALID_STATUS_POLICY`。
+A nonempty `retry.errorCodes` is an allowlist: only the listed error codes can be retried under the method and count policies, with no exception for `ERR_NETWORK` or timeouts. If omitted or empty, the default error policy applies. The allowlist can override an error's default `retryable: false`. The default policy does not retry `ERR_INVALID_STATUS_POLICY` thrown by a local status callback.
 
-每次尝试（包括重试）都会重新经过限速排队，因此自动重试不会绕过 `requestsPerInterval`；重试钩子（`beforeRetry`）和响应拦截器在等待期间不占用 `maxConcurrent` 名额，可以在其中安全地通过同一客户端发起令牌刷新等请求。
+Every attempt, including retries, reenters the rate-limit queue, so automatic retries do not bypass `requestsPerInterval`. Retry hooks (`beforeRetry`) and response interceptors do not occupy a `maxConcurrent` slot while awaiting completion, so they can safely make requests such as token refreshes through the same client.
 
-重试期间会复用同一个 `X-Request-Id`。`totalTimeout` 到期后不会进入下一次重试，即使还剩重试次数也会直接返回 `ETIMEDOUT`。
+The same `X-Request-Id` is reused across retries. Once `totalTimeout` expires, no further retry begins; the request returns `ETIMEDOUT` even if retry attempts remain.
 
-需要更细粒度控制时可以传入对象：
+Pass an object for finer control:
 
 ```typescript
 const response = await http.getResponse('/upstream', {
@@ -682,9 +682,9 @@ const response = await http.getResponse('/upstream', {
 });
 ```
 
-`methods` 可以显式调整方法范围，`shouldRetry` 可以接管默认的方法、状态和错误判断。重试使用本轮实际发送的 method/body；诊断用的 `error.config` 不决定重试资格。外部取消和不可重放的 `ReadableStream` 请求体始终不会重试，即使 `shouldRetry` 返回 `true`。
+`methods` explicitly adjusts the allowed methods, and `shouldRetry` can take over the default method, status, and error decisions. Retries use the method and body actually sent for the current attempt; the diagnostic `error.config` does not determine retry eligibility. External cancellations and nonreplayable `ReadableStream` request bodies are never retried, even if `shouldRetry` returns `true`.
 
-## 拦截器
+## Interceptors
 
 ```typescript
 import { AxiosHeaders } from '@nexusmc-cn/axnexus';
@@ -703,15 +703,15 @@ http.interceptors.response.use((response) => {
 });
 
 http.interceptors.response.use(undefined, (error) => {
-  // 可在这里记录或恢复错误；继续抛出则保留重试策略。
+  // Log or recover from the error here; rethrow to preserve the retry policy.
   console.warn(error);
   throw error;
 });
 ```
 
-请求拦截器按注册顺序执行，响应拦截器按注册逆序执行。请求拦截器回调收到的是可直接调用 `.set()`、`.delete()` 的 `AxiosHeaders`；它是本次请求的最终头集合，因此删除客户端默认头不会在后续合并时恢复。`use` 返回数字 ID，可以传给对应管理器的 `eject` 移除。拦截器只属于当前客户端实例，不会修改全局状态。
+Request interceptors run in registration order; response interceptors run in reverse registration order. Request interceptor callbacks receive `AxiosHeaders`, with `.set()` and `.delete()` available directly. These are the request's final headers, so deleting a client default header prevents later merges from restoring it. `use` returns a numeric ID that can be passed to the corresponding manager's `eject` method to remove the interceptor. Interceptors belong only to the current client instance and do not modify global state.
 
-## GET 缓存
+## GET cache
 
 ```typescript
 const cachedHttp = createHttpClient({
@@ -721,15 +721,15 @@ const cachedHttp = createHttpClient({
 });
 
 await cachedHttp.get('/catalog');
-await cachedHttp.get('/catalog'); // TTL 内复用缓存
+await cachedHttp.get('/catalog'); // Reuse the cache within its TTL.
 await cachedHttp.get('/catalog', { bypassCache: true });
 
 cachedHttp.clearCache();
 ```
 
-缓存只作用于 GET。请求拦截器执行后按最终 URL、headers、响应类型、凭据及 Fetch 行为选项生成 key，自动生成的请求 ID 除外。缓存保存响应字节快照，每个调用方分别执行解析、schema、转换和响应拦截器；命中缓存也不会跳过这些处理。相同 key 的网络请求可以去重，各调用方的取消、单次超时和总时限独立；全部等待者退出后取消共享传输。
+Caching applies only to GET. After request interceptors run, the key is generated from the final URL, headers, response type, credentials, and Fetch behavior options, excluding automatically generated request IDs. The cache stores snapshots of response bytes. Each caller independently runs parsing, schema validation, transforms, and response interceptors; cache hits do not skip these steps. Network requests with the same key can be deduplicated, while each caller's cancellation, per-attempt timeout, and total timeout remain independent. The shared transport is canceled once all waiters leave.
 
-携带潜在自动 Cookie 的请求（包括默认的 `same-origin`）必须指定会话分区，才能进入结果缓存或共享网络请求；公开数据建议使用 `credentials: 'omit'`：
+Requests that may carry automatic cookies, including the default `same-origin` mode, must specify a session partition to use the result cache or share network requests. For public data, use `credentials: 'omit'`:
 
 ```typescript
 await http.get('/me', {
@@ -737,15 +737,15 @@ await http.get('/me', {
 });
 ```
 
-分区应在登录、退出或切换用户时改变，并调用 `clearCache()` 释放旧条目；SSR 应创建请求级客户端。显式 Authorization/Cookie 也参与 key。仅设置 `credentials` 字符串不能区分 HttpOnly Cookie 的会话。
+Change the partition on login, logout, or user switches, and call `clearCache()` to release old entries. SSR should create a request-scoped client. Explicit Authorization/Cookie headers also contribute to the key. The `credentials` string alone cannot distinguish sessions established by HttpOnly cookies.
 
-`signal`、超时和拦截器本身不会禁用缓存。完整响应接口、raw Response、请求体，以及请求级 `maxBodySize`、上传/下载进度、限速、`dispatcher` 或 `agent` 仍会保守跳过共享。非 2xx、`Cache-Control: no-store` 和 `Vary: *` 响应不保留 TTL 条目；客户端缓存不是完整的浏览器 HTTP cache。
+`signal`, timeouts, and interceptors do not themselves disable caching. Complete-response APIs, raw Responses, request bodies, and request-level `maxBodySize`, upload/download progress, rate limiting, `dispatcher`, or `agent` still conservatively bypass sharing. Non-2xx responses and responses with `Cache-Control: no-store` or `Vary: *` are not retained as TTL entries. The client cache is not a complete browser HTTP cache.
 
-实际发出的非 GET 请求会清空当前实例缓存，包括重试时从 GET 改成 POST 的情况；这些请求即使在响应解析或校验阶段失败，也会清空缓存。缓存保存在内存中，不跨实例或持久化；`GetRequestCache` 默认最多保留 512 条，单条超过约 1 MB 不保留，并提供 `prune()` 主动回收过期条目。字符串、Blob 和二进制值按字节估算，二进制视图按完整底层 buffer 计量；Map/Set 递归估算，无法估算的对象不驻留。失效元数据也会回收。
+Non-GET requests that are actually sent clear the current instance's cache, including requests changed from GET to POST during retries. They clear the cache even if response parsing or validation later fails. The cache lives in memory and is neither shared across instances nor persisted. `GetRequestCache` keeps at most 512 entries by default, does not retain individual entries larger than approximately 1 MB, and provides `prune()` to actively reclaim expired entries. Strings, Blobs, and binary values are estimated in bytes; binary views are counted using their entire underlying buffer. Map/Set values are estimated recursively, and objects whose size cannot be estimated are not retained. Invalidation metadata is also reclaimed.
 
-### stale-while-revalidate 响应缓存
+### stale-while-revalidate response cache
 
-需要 stale-while-revalidate 或 stale-if-error 时直接使用 `ResponseCache`。它与客户端 GET 缓存独立，不共享条目：
+Use `ResponseCache` directly for stale-while-revalidate or stale-if-error behavior. It is independent of the client GET cache and does not share its entries:
 
 ```typescript
 import { ResponseCache } from '@nexusmc-cn/axnexus';
@@ -758,15 +758,15 @@ const data = await cache.getOrLoad('catalog', loadCatalog, {
 });
 ```
 
-`maxEntries` 限制条目数量，默认是 `256`。写入和读取都会优先使用 `structuredClone`，再回退到 JSON clone；后者可能丢失 `Date`、`Map` 等类型信息。两种方式都不支持的值会按原引用返回，因此缓存值应视为不可变数据。没有公开的 clone 开关。
+`maxEntries` limits the number of entries and defaults to `256`. Both writes and reads prefer `structuredClone`, falling back to a JSON clone, which may lose type information such as `Date` and `Map`. Values unsupported by both methods are returned by their original reference, so cached values should be treated as immutable. There is no public clone toggle.
 
-直接使用 `GetRequestCache` 时，`options.signal` 只取消当前调用方的等待；全部等待者退出后，共享 loader 收到的 signal 会取消。`ResponseCache` 本身不提供调用方取消选项，loader 的取消策略由调用方管理。
+When using `GetRequestCache` directly, `options.signal` cancels only the current caller's wait. Once all waiters leave, the signal passed to the shared loader is aborted. `ResponseCache` itself provides no per-caller cancellation option; the caller manages the loader's cancellation policy.
 
-## SSR 和一次性 JSON 请求
+## SSR and one-off JSON requests
 
-`fetchJson` 是不带客户端实例状态的轻量 JSON helper，适合 SSR、middleware 和一次性请求。它支持显式传入 `cookie`、注入 `fetch` 和 JSON parser；`headers` 接受与主客户端相同的 `HeaderInput`（包括 `AxiosHeaders`），`maxBodySize` 默认不限制响应体。`timeout` 和 `timeoutMs` 都可用，同时提供时以 `timeoutMs` 为准。
+`fetchJson` is a lightweight JSON helper with no client instance state, suitable for SSR, middleware, and one-off requests. It supports an explicit `cookie`, an injected `fetch`, and a JSON parser. Its `headers` accepts the same `HeaderInput` as the main client, including `AxiosHeaders`; `maxBodySize` imposes no response body limit by default. Both `timeout` and `timeoutMs` are accepted, with `timeoutMs` taking precedence when both are supplied.
 
-它采用原生 Fetch 的凭据策略；浏览器需要跨源凭据时显式传入 `credentials: 'include'`，服务端转发 Cookie 时使用 `cookie`。
+It follows native Fetch credential behavior. Explicitly pass `credentials: 'include'` when cross-origin credentials are needed in the browser, and use `cookie` to forward cookies on the server.
 
 ```typescript
 import { fetchJson } from '@nexusmc-cn/axnexus';
@@ -777,7 +777,7 @@ const data = await fetchJson<{ ok: boolean }>('https://api.example.test/health',
 });
 ```
 
-默认非 2xx 返回 `null`，保持原有行为；设置 `throwHttpErrors: true` 后抛出带 status/response 的 `HttpError`。成功的 JSON `null`、`204`、`205`、`HEAD`、`Content-Length: 0`、空字节或只有空白字符的响应仍返回 `null`；304 默认返回 `null`，开启抛错时作为非 2xx 处理。需要状态码和响应元数据时使用 `fetchJsonResult`：
+Non-2xx responses return `null` by default, preserving existing behavior. Set `throwHttpErrors: true` to throw an `HttpError` containing the status and response. Successful JSON `null`, `204`, `205`, `HEAD`, `Content-Length: 0`, empty bytes, and whitespace-only responses still return `null`. A 304 returns `null` by default and is treated as non-2xx when throwing is enabled. Use `fetchJsonResult` when you need the status code and response metadata:
 
 ```typescript
 import { fetchJsonResult } from '@nexusmc-cn/axnexus';
@@ -790,11 +790,11 @@ if (result.status >= 400) {
 }
 ```
 
-成功状态的非空响应交给 `parseJson`（默认 `JSON.parse`）；解析失败抛出 `ERR_BAD_PAYLOAD`。超时或外部 signal 取消按原生 `AbortError` 传播，与客户端的 `ETIMEDOUT` / `ERR_CANCELED` 错误码不同。`fetchJsonResult` 的 `response` 已被 helper 消费或取消；需要原始响应体时使用客户端的 `responseType: 'response'`。
+Nonempty successful responses are passed to `parseJson` (defaulting to `JSON.parse`); parsing failures throw `ERR_BAD_PAYLOAD`. Timeouts and external signal cancellation propagate as native `AbortError`, unlike the client's `ETIMEDOUT` / `ERR_CANCELED` error codes. The `response` returned by `fetchJsonResult` has already been consumed or canceled by the helper. Use the client's `responseType: 'response'` when you need the raw body.
 
-## SSE 和 NDJSON
+## SSE and NDJSON
 
-`./stream` 基于未消费的原始 `Response` 增量解码，返回 `AsyncIterable`。`parseSSE` 默认保留字符串 data 和 `event`、`id`、`retry`；`parseNDJSON` 默认逐行解析 JSON，类型为 `unknown`。提供 `schema` 后逐条校验并推导输出；SSE 的 JSON data 还需显式配置 `parseJson: JSON.parse`。
+`./stream` incrementally decodes an unconsumed raw `Response` and returns an `AsyncIterable`. By default, `parseSSE` preserves string data and the `event`, `id`, and `retry` fields; `parseNDJSON` parses JSON line by line with a default type of `unknown`. Providing a `schema` validates each item and infers the output type. For JSON data in SSE, also explicitly configure `parseJson: JSON.parse`.
 
 ```typescript
 import { parseSSE, parseNDJSON, connectSSE } from '@nexusmc-cn/axnexus/stream';
@@ -819,15 +819,15 @@ for await (const event of connectSSE(http, '/user-events', {
 }
 ```
 
-`maxMessageSize` 默认是 `1 MiB`，按 UTF-8 字节限制每条 NDJSON 记录或整个 SSE 帧，包含 SSE 字段及注释，不含换行符；它与整份响应的 `maxBodySize` 独立。`idleTimeout` 限制等待下一个响应块的时间，`0` 或省略表示关闭，不计消费者处理消息的时间。解析、校验失败、`break`、迭代器 `.return()` 或外部 `signal` 取消都会释放 reader；`.return()` 也会中断正在等待的读取或校验。
+`maxMessageSize` defaults to `1 MiB` and limits each NDJSON record or entire SSE frame in UTF-8 bytes, including SSE fields and comments but excluding newline characters. It is independent of `maxBodySize`, which limits the whole response. `idleTimeout` limits the wait for the next response chunk; `0` or omission disables it, and time spent by the consumer processing messages is excluded. Parsing failures, validation failures, `break`, iterator `.return()`, and external `signal` cancellation all release the reader. `.return()` also interrupts a pending read or validation.
 
-`connectSSE` 默认只连接一次。重连必须显式开启且仅支持 GET，`maxAttempts` 包含首次连接，延迟受 `maxDelay` 限制；默认不因正常 EOF 重连。重连携带最后有效的 `Last-Event-ID`，空 id 会重置它；HTTP 204 或 `isComplete(event)` 返回 `true` 时结束，完成事件不再输出。服务端仍需处理重放和去重，这不保证恰好一次投递。普通请求重试在连接时关闭；使用该入口的客户端响应拦截器应保留未消费的原始响应。XHR 不适合实时 SSE。
+`connectSSE` connects only once by default. Reconnection must be explicitly enabled and supports only GET. `maxAttempts` includes the initial connection, and delays are capped by `maxDelay`; normal EOF does not trigger reconnection by default. Reconnection sends the last valid `Last-Event-ID`, which an empty id resets. HTTP 204 or `isComplete(event)` returning `true` ends the stream, and the completion event is not yielded. The server still needs to handle replay and deduplication; this does not guarantee exactly-once delivery. Ordinary request retries are disabled when connecting. Client response interceptors used with this entry point should preserve the unconsumed raw response. XHR is unsuitable for real-time SSE.
 
-## Fetch 桥接与 oRPC
+## Fetch bridge and oRPC
 
-`./fetch` 的 `createFetchHandler` 创建可注入 SDK 的 Fetch 函数，使用专用客户端，只接受 transport、headers、超时、大小限制、限速和进度配置。它关闭 axnexus 重试和缓存，把 HTTP 状态及原始响应体交给 SDK；不接受 schema、响应转换、客户端插件或拦截器配置。
+`createFetchHandler` from `./fetch` creates an SDK-injectable Fetch function backed by a dedicated client. It accepts only transport, headers, timeout, size-limit, rate-limit, and progress configuration. It disables axnexus retries and caching, leaving HTTP statuses and raw response bodies to the SDK. It does not accept schema, response transform, client plugin, or interceptor configuration.
 
-使用 oRPC 时由应用安装 `@orpc/client`：
+When using oRPC, install `@orpc/client` in your application:
 
 ```bash
 pnpm add @orpc/client
@@ -847,11 +847,11 @@ try {
 }
 ```
 
-桥接保留 Request/init 的方法、headers、signal、原始 body 和 `redirect: 'manual'`，不会重复 JSON 编码或预读响应。传输失败仍使用 axnexus 的 `HttpError` 分类。应用结束使用该 transport 后调用 `close()` 释放持久连接等资源。
+The bridge preserves the Request/init method, headers, signal, raw body, and `redirect: 'manual'`, without encoding JSON a second time or reading the response in advance. Transport failures retain axnexus's `HttpError` classification. Call `close()` after the application finishes using the transport to release resources such as persistent connections.
 
-## 端点契约
+## Endpoint contracts
 
-`./contracts` 的 `defineEndpoint` 描述 method、相对 path、query/body/output schema 和业务 `errors` map。`{name}` 路径参数按独立片段编码；query/body 接受 schema 的输入类型，网络发送使用校验后的输出。路径或输入校验失败时不产生网络 I/O。
+`defineEndpoint` from `./contracts` describes the method, relative path, query/body/output schemas, and a domain `errors` map. `{name}` path parameters are encoded as individual segments. Query and body values accept the schema's input type; network requests send its validated output. Path or input validation failures produce no network I/O.
 
 ```typescript
 import { defineEndpoint } from '@nexusmc-cn/axnexus/contracts';
@@ -870,17 +870,17 @@ const result = await users.safeCall(input);
 if (result.kind === 'success') {
   console.log(result.data.name);
 } else if (result.kind === 'domain' && result.error.code === 'CONFLICT') {
-  console.log('已存在的用户：', result.error.data.name);
+  console.log('Existing user:', result.error.data.name);
 }
 ```
 
-也可直接调用 `updateUser.call(http, input)` / `safeCall(http, input)`。`call` 失败时抛错；`safeCall` 用 `kind` 区分 `success`、`domain`、`http`、`transport` 和 `unexpected`。仅当状态码与已声明错误 schema 同时匹配时生成带业务 code/data 的 `DomainError`；未声明或错误体不匹配时保留 HTTP 错误。业务 code 与 `HttpErrorCode` 相互独立。
+You can also call `updateUser.call(http, input)` / `safeCall(http, input)` directly. `call` throws on failure; `safeCall` uses `kind` to distinguish `success`, `domain`, `http`, `transport`, and `unexpected`. A `DomainError` with a domain code and data is created only when both the status code and a declared error schema match. Undeclared statuses or mismatched error bodies remain HTTP errors. Domain codes are independent of `HttpErrorCode`.
 
-契约自己校验输出，并覆盖客户端默认 schema 和响应转换。调用级或客户端默认 `timeout` / `totalTimeout` 形成覆盖输入校验、网络、输出及业务错误校验的整次调用预算，外部 signal 也覆盖这些阶段。schema 回调应自行停止其内部异步工作；取消会结束调用方等待。绑定前后均保留客户端的 context 类型。
+The contract validates its own output and overrides the client's default schema and response transforms. Call-level or client-default `timeout` / `totalTimeout` establish a budget for the entire call, covering input validation, the network request, output validation, and domain-error validation. The external signal also covers these stages. Schema callbacks should stop their own internal asynchronous work; cancellation ends the caller's wait. The client's context type is preserved both before and after binding.
 
-## 分块上传
+## Chunked uploads
 
-`uploadChunks` 接受 `Uint8Array`，负责编排分块、并发和聚合进度，实际上传由调用方提供，可接入 multipart、对象存储或自定义分片协议：
+`uploadChunks` accepts a `Uint8Array` and orchestrates chunking, concurrency, and aggregate progress. The caller provides the actual upload operation, allowing integration with multipart uploads, object storage, or custom chunk protocols:
 
 ```typescript
 import { uploadChunks } from '@nexusmc-cn/axnexus';
@@ -890,7 +890,7 @@ const parts = await uploadChunks(bytes, {
   chunkSize: 5 * 1024 * 1024,
   concurrency: 3,
   signal: controller.signal,
-  retry: 2, // 每个分片额外尝试 2 次
+  retry: 2, // Allow 2 additional attempts per chunk.
   retryDelay: (attempt) => attempt * 200,
   onPartError: ({ part, attempt, error }) => reportPartFailure(part.index, attempt, error),
   onProgress: (loaded, total) => console.log(loaded / total),
@@ -898,19 +898,19 @@ const parts = await uploadChunks(bytes, {
 });
 ```
 
-`retry` 只作用于失败的分片，不会重新上传已经成功的分片；`onPartError` 会收到每次失败（包括最终失败）以及同一个编排 `signal`。重试复用相同的 `body`，上传回调不应修改它；`part.end` 是不包含在分片内的结束偏移。
+`retry` applies only to failed chunks and does not reupload successful ones. `onPartError` receives every failure, including the final one, and the same orchestration `signal`. Retries reuse the same `body`, which the upload callback should not modify. `part.end` is the exclusive end offset.
 
-用户取消时调用 `controller.abort()`。编排器会停止新分片、重试等待和对异步回调的等待，并抛出原生 `AbortError`；回调必须把 `part.signal` 传给底层请求，才能取消在途网络操作。取消后的迟到结果不会写入聚合结果或触发成功进度。
+Call `controller.abort()` to cancel. The orchestrator stops starting new chunks, ends retry waits, stops waiting for asynchronous callbacks, and throws a native `AbortError`. Callbacks must pass `part.signal` to the underlying request to cancel in-flight network operations. Results arriving after cancellation are neither added to the aggregate results nor reported as successful progress.
 
-某个分片最终失败，或 `onPartError`、`retryDelay`、`onProgress` 抛错时，整体 Promise reject 并停止调度新分片；已经在途的上传不会自动取消或回滚。服务端清理、断点续传和合并由上传协议负责，上传回调应按分片 ID 保证幂等。`onProgress` 只累计成功分片的字节数，空 source 不产生进度事件。
+If a chunk ultimately fails, or `onPartError`, `retryDelay`, or `onProgress` throws, the overall Promise rejects and no new chunks are scheduled. Uploads already in flight are not automatically canceled or rolled back. The upload protocol is responsible for server cleanup, resumability, and assembly; upload callbacks should ensure idempotency by chunk ID. `onProgress` counts only bytes from successful chunks; an empty source emits no progress events.
 
-`chunkSize` 和 `concurrency` 向下取整为正整数，非有限或非正值回退为 `1`；`retryDelay` 的非有限或负值回退为 `0`。需要严格参数校验时，应在调用前完成。
+`chunkSize` and `concurrency` are rounded down to positive integers, with nonfinite or nonpositive values falling back to `1`. Nonfinite or negative `retryDelay` values fall back to `0`. Perform any strict argument validation before calling the function.
 
-## 请求观测
+## Request observability
 
-### Context 和插件
+### Context and plugins
 
-`createHttpClient<TContext>()` 为配置、拦截器、插件和可选集成保留本地 context 类型。context 不会自动发到服务端、写入日志或进入缓存键；影响响应的租户、语言或身份仍需显式映射到请求和缓存分区。
+`createHttpClient<TContext>()` preserves the local context type across configuration, interceptors, plugins, and optional integrations. Context is not automatically sent to the server, logged, or included in cache keys. Tenants, languages, or identities that affect the response must still be explicitly mapped to requests and cache partitions.
 
 ```typescript
 import { createHttpClient, type HttpPlugin } from '@nexusmc-cn/axnexus';
@@ -934,27 +934,27 @@ await detach();
 await scopedHttp.close();
 ```
 
-`plugins` 按配置顺序注册，`use()` 返回可重复调用的异步卸载函数。`setup(client)` 同步执行一次，可注册拦截器并返回清理函数；`close()` 卸载插件并释放 adapter 资源。复用有状态插件定义时用 `create()` 创建每客户端独立状态。
+`plugins` are registered in configuration order, and `use()` returns an asynchronous detach function that can be called repeatedly. `setup(client)` runs synchronously once, can register interceptors, and can return a cleanup function. `close()` detaches plugins and releases adapter resources. When reusing a stateful plugin definition, use `create()` to create independent state for each client.
 
-`onEvent` 用于记录事件，返回值不会替换请求结果；同步异常和异步拒绝与请求结果隔离，请求不会等待观测任务完成。事件中的 config/context 保留引用，修改请求应使用 `setup` 注册拦截器。事件区分逻辑请求、attempt、transport、缓存命中/去重，以及 `queue`、`retry`、`body` 的开始和结束。结束事件的 `duration` 单位为毫秒；retry 包含 `beforeRetry` 和等待时间，其 `attempt` 是即将执行的重试序号，从 1 开始。原始流的最终请求事件在 EOF、读取失败或取消时产生。
+`onEvent` records events; its return value does not replace the request result. Synchronous exceptions and asynchronous rejections are isolated from request results, and requests do not wait for observation tasks to finish. Event config/context values retain their references; to modify requests, register interceptors through `setup`. Events distinguish logical requests, attempts, transports, cache hits/deduplication, and the start and end of `queue`, `retry`, and `body` phases. End-event `duration` is measured in milliseconds. Retry duration includes `beforeRetry` and the wait; its `attempt` is the upcoming retry number, starting at 1. The final request event for a raw stream is emitted on EOF, read failure, or cancellation.
 
-### 自动日志
+### Automatic logging
 
-已有 logger 可自动绑定到客户端生命周期：
+An existing logger can be attached to the client's lifecycle automatically:
 
 ```typescript
 import { createRequestLogger, attachRequestLogger, createRequestLoggerPlugin } from '@nexusmc-cn/axnexus';
 
 const autoLogger = createRequestLogger((record) => console.info(record));
 const detachLogger = attachRequestLogger(http, autoLogger);
-// 或在创建时配置 plugins: [createRequestLoggerPlugin(autoLogger)]
+// Or configure plugins: [createRequestLoggerPlugin(autoLogger)] at creation time.
 await http.get('/health');
 await detachLogger();
 ```
 
-自动日志为每个逻辑请求记录一次开始与结束，沿用下述脱敏规则；结束记录汇总排队、重试等待和原始流消费耗时，以及尝试次数和缓存复用方式。原始流在消费结束后才结束日志。单独使用 logger 仍可手动记录：
+Automatic logging records one start and one end for each logical request, following the redaction rules below. End records summarize time spent queuing, waiting for retries, and consuming raw streams, along with the attempt count and cache reuse mode. A raw stream's log ends only after consumption finishes. You can still use the logger independently for manual records:
 
-`createRequestLogger` 将请求开始、完成和错误统一成可注入的记录格式，并默认脱敏 `authorization`、`cookie` 和 `set-cookie`。`record`、`start`、`complete` 和 `error` 都遵守同一套输入与脱敏规则；`start` 返回一次性生命周期句柄，句柄会用 `options.now`（默认 `Date.now`）计算耗时：
+`createRequestLogger` represents request starts, completions, and errors in a consistent record format sent to an injectable sink. It redacts `authorization`, `cookie`, and `set-cookie` by default. `record`, `start`, `complete`, and `error` share the same input and redaction rules. `start` returns a single-use lifecycle handle that calculates duration using `options.now` (defaulting to `Date.now`):
 
 ```typescript
 import { createRequestLogger } from '@nexusmc-cn/axnexus';
@@ -969,25 +969,25 @@ try {
 }
 ```
 
-`record(input)` 可以直接写入完整记录；字段如下：
+`record(input)` writes a complete record directly, with the following fields:
 
-| 字段 | 说明 |
+| Field | Description |
 | --- | --- |
-| `phase` | `start`、`complete` 或 `error` |
-| `method` / `url` | 请求方法和 URL，method 会规范化为大写 |
-| `headers` | 接受 `HeaderInput`，输出时规范化并脱敏敏感头 |
-| `status` | 可选的 HTTP 状态码 |
-| `duration` | 毫秒数；生命周期句柄可自动计算 |
-| `timings` | 自动日志累计的 `queue`、`retry` 毫秒数；原始响应体结束时包含 `body`，从响应交还给消费者起计时 |
-| `attempts` / `cache` | 自动日志的 attempt 数量，以及发生缓存复用时的 `hit` 或 `dedupe`；attempt 不等同于实际网络请求次数 |
-| `responseBytes` | 可选的响应字节数 |
-| `error` | 错误摘要，裁剪任意附加字段并脱敏 `HttpError.config.headers` |
+| `phase` | `start`, `complete`, or `error` |
+| `method` / `url` | Request method and URL; the method is normalized to uppercase |
+| `headers` | Accepts `HeaderInput`; output is normalized and sensitive headers are redacted |
+| `status` | Optional HTTP status code |
+| `duration` | Milliseconds; lifecycle handles can calculate this automatically |
+| `timings` | Cumulative `queue` and `retry` milliseconds from automatic logging; includes `body` when the raw body ends, measured from when the response is handed to the consumer |
+| `attempts` / `cache` | Automatic-log attempt count, plus `hit` or `dedupe` when cache reuse occurs; attempts are not the same as actual network requests |
+| `responseBytes` | Optional response size in bytes |
+| `error` | Error summary with arbitrary extra fields removed and `HttpError.config.headers` redacted |
 
-`start()` 返回的句柄只结束自己的生命周期，且只记录一次；顶层 `logger.complete()` 和 `logger.error()` 是 `record()` 的快捷方式，不会结束已有句柄。`redactHeaders` 可追加敏感 header；URL、错误消息和 `HttpError.config.url` 默认过滤 token、access_token、key、api_key、secret、password、signature 等敏感 query，支持编码和重复参数，普通参数保留。使用 `redactQueryParams: ['ticket']` 追加字段，或通过 `redactError: (sanitizedError) => ...` 处理业务错误中的其他敏感内容。
+The handle returned by `start()` ends only its own lifecycle and records it once. Top-level `logger.complete()` and `logger.error()` are shortcuts for `record()` and do not end existing handles. `redactHeaders` adds sensitive headers. URLs, error messages, and `HttpError.config.url` filter sensitive query parameters such as token, access_token, key, api_key, secret, password, and signature by default, including encoded and repeated parameters; ordinary parameters are preserved. Add fields with `redactQueryParams: ['ticket']`, or use `redactError: (sanitizedError) => ...` to handle other sensitive content in domain errors.
 
 ### OpenTelemetry
 
-只有使用 `./opentelemetry` 时才需安装 `@opentelemetry/api`；应用负责配置 SDK/provider/exporter，并传入自己的 tracer。插件不会安装全局 provider，也不默认注入 trace headers。
+Install `@opentelemetry/api` only when using `./opentelemetry`. The application configures the SDK/provider/exporter and supplies its own tracer. The plugin does not install a global provider or inject trace headers by default.
 
 ```bash
 pnpm add @opentelemetry/api
@@ -1004,11 +1004,11 @@ await http.get('/health');
 await detachTelemetry();
 ```
 
-插件按逻辑请求和 attempt 建立 span，记录缓存、transport、排队、重试等待和流消费事件，结束事件用 `axnexus.duration_ms` 记录毫秒耗时；默认只记录方法、状态、耗时及错误分类，不写入请求 URL、headers、payload 或 context。
+The plugin creates spans for logical requests and attempts, recording cache, transport, queuing, retry-wait, and stream-consumption events. End events record elapsed milliseconds as `axnexus.duration_ms`. By default, it records only method, status, duration, and error classification, omitting request URLs, headers, payloads, and context.
 
 ## TanStack Query
 
-`./tanstack-query` 提供 `createQueryOptions`、`createInfiniteQueryOptions` 和 `createMutationOptions`，保留 schema 输出及客户端 context 类型。也可用 `createQueryIntegration(client)` 绑定客户端，调用 `.query(input)`、`.mutation<S, Variables>(input)` 和 `.infiniteQuery<Page, S>(input)`。使用时由应用安装 Query v5 的 `@tanstack/query-core`，也可把返回的 options 交给对应框架的 Query 适配层。
+`./tanstack-query` provides `createQueryOptions`, `createInfiniteQueryOptions`, and `createMutationOptions`, preserving schema output and client context types. You can also bind a client with `createQueryIntegration(client)` and call `.query(input)`, `.mutation<S, Variables>(input)`, and `.infiniteQuery<Page, S>(input)`. Install Query v5's `@tanstack/query-core` in the application; the returned options can also be passed to the Query integration for your framework.
 
 ```bash
 pnpm add @tanstack/query-core
@@ -1033,17 +1033,17 @@ const mutation = queries.mutation<typeof userSchema, { name: string }>({
 const created = await mutation.mutationFn({ name: 'Anna' }); // User | null
 ```
 
-Query 管理缓存、重试和失效；这些 options 默认 `retry: false`，需要重试时在 Query 层显式配置。底层 axnexus 请求始终关闭重试和 GET 缓存，且由该次配置的 schema 负责输出校验。query/infinite 合并 Query 的取消 signal 与 `config.signal`，任一取消都会传递到底层；mutation 也保留 `config.signal`。
+Query manages caching, retries, and invalidation. These options default to `retry: false`; explicitly configure retries at the Query layer when needed. The underlying axnexus request always disables retries and the GET cache, and the schema configured for that call validates the output. Query/infinite options combine Query's cancellation signal with `config.signal`, propagating cancellation from either to the underlying request. Mutation options also preserve `config.signal`.
 
-mutation 的变量类型可用第二个泛型指定，响应由 schema 推导；自动重试仍需应用保证幂等。客户端带类型化 context 且需要显式指定 Variables 时，使用上述绑定工厂，避免 TypeScript 无法只推导剩余泛型而丢失客户端 context 类型；独立工厂仍适合完整推导的调用。
+Specify mutation variable types with the second generic; the response is inferred from the schema. Applications remain responsible for idempotency when enabling automatic retries. When the client has typed context and you need to specify Variables explicitly, use the bound factory above to avoid losing the client context type because TypeScript cannot infer only the remaining generics. Standalone factories remain suitable for calls with full inference.
 
-query/infinite 的 `partition` 必填，使用非敏感的会话版本、租户和语言标识，身份变化时切换分区。默认 key 包含 URL 与普通 query 参数；普通 query 和 infinite query 使用不同命名空间。含凭据的 URL/params 需要显式提供非敏感 `key`，不要把 token、Cookie、Authorization 或密码放入 key。敏感字段检测沿用 logger 的默认名单，URL 中编码后的字段名也会识别；自定义敏感字段仍需调用方主动避开。显式 key 会替代 URL/params 部分，调用方须完整包含影响响应的筛选、排序、分页大小及其他分区条件。
+`partition` is required for query/infinite options. Use nonsensitive session-version, tenant, and language identifiers, and switch partitions when identity changes. The default key includes the URL and ordinary query parameters; regular and infinite queries use separate namespaces. URLs/params containing credentials require an explicit nonsensitive `key`. Do not put tokens, Cookie, Authorization, or passwords in keys. Sensitive-field detection uses the logger's default list and recognizes encoded field names in URLs; callers must still avoid custom sensitive fields themselves. An explicit key replaces the URL/params portion, so callers must include all response-affecting filters, sorting, page sizes, and other partition conditions.
 
-`createInfiniteQueryOptions` 另需 `initialPageParam`、`params(pageParam)` 和 `getNextPageParam`；其 key 不会自动展开参数函数，调用方须用显式 `key` 区分固定筛选和分页策略。每页结果同样按 schema 推导并包含可能的 `null`。
+`createInfiniteQueryOptions` also requires `initialPageParam`, `params(pageParam)`, and `getNextPageParam`. Its key does not automatically expand the parameters function; callers must use an explicit `key` to distinguish fixed filters and pagination strategies. Each page's result is likewise inferred from the schema and includes possible `null`.
 
 ## CSRF
 
-CSRF 不会默认启用。使用 `createCsrfInterceptor` 注入 token reader：
+CSRF protection is not enabled by default. Use `createCsrfInterceptor` to inject a token reader:
 
 ```typescript
 import { createCsrfInterceptor } from '@nexusmc-cn/axnexus';
@@ -1055,13 +1055,13 @@ const csrf = createCsrfInterceptor({
 http.interceptors.request.use(csrf);
 ```
 
-默认只处理 `POST`、`PUT`、`PATCH` 和 `DELETE`，信任浏览器同源及客户端 `baseURL` 的 origin；合法跨源 API 使用 `allowedOrigins: ['https://api.example.com']` 显式允许。最终发送前会再次检查目标地址，后续拦截器改写外站 URL 时会移除自动注入的 token；`credentials: 'omit'` 不控制显式 header，因此不能代替 origin 校验。
+By default, it handles only `POST`, `PUT`, `PATCH`, and `DELETE`, trusting the browser's own origin and the origin of the client's `baseURL`. Explicitly allow legitimate cross-origin APIs with `allowedOrigins: ['https://api.example.com']`. The destination is checked again just before sending; if a later interceptor rewrites the URL to an external origin, the automatically injected token is removed. `credentials: 'omit'` does not control explicit headers and cannot replace origin validation.
 
-自动 token 的来源保存在私有元数据中，不发送内部标记；reader 清空后重试会移除旧 token。显式设置的 header 优先，调用方负责其发送范围。自动 token 请求禁止自动跟随重定向（`redirect: 'error'`，显式 `manual` 保留）；XHR 无法控制重定向，因此拒绝这种请求并返回 `ERR_UNSUPPORTED_ADAPTER`，应使用 Fetch。自定义 adapter 应遵守 `redirect` 配置。
+The source of an automatic token is kept in private metadata; no internal marker is sent. If the reader returns no token, a retry removes the old one. Explicitly set headers take precedence, and callers are responsible for their destination scope. Requests carrying automatic tokens cannot follow redirects automatically (`redirect: 'error'`; explicit `manual` is preserved). Because XHR cannot control redirects, it rejects these requests with `ERR_UNSUPPORTED_ADAPTER`; use Fetch instead. Custom adapters should honor the `redirect` configuration.
 
-## HTTP/2 和 HTTP/3
+## HTTP/2 and HTTP/3
 
-HTTP/2 通过独立入口启用，adapter 会按 origin 复用 session，并在完整响应中标记 `protocol: 'h2'`。Node 使用原生 `node:http2`；Bun 中通过 Node 兼容层接入的 HTTP/2 按实验性能力使用：
+Enable HTTP/2 through its separate entry point. The adapter reuses sessions by origin and marks complete responses with `protocol: 'h2'`. Node uses native `node:http2`; HTTP/2 through Bun's Node compatibility layer should be treated as experimental:
 
 ```typescript
 import { createHttpClient } from '@nexusmc-cn/axnexus';
@@ -1075,17 +1075,17 @@ const response = await nodeHttp.getResponse('/health');
 console.log(response.protocol); // h2
 ```
 
-每个请求有独立 stream，单个请求的错误、取消或超时只关闭该 stream。session 自身发生 `error` 或 `close` 时，会结束该 session 上的活动请求并移出复用池；收到 `GOAWAY` 后新请求会建立新连接。调用方仍需分别处理每个请求的错误。
+Each request has its own stream; an individual request's error, cancellation, or timeout closes only that stream. A session-level `error` or `close` ends active requests on that session and removes it from the reuse pool. After `GOAWAY`, new requests establish a new connection. Callers must still handle errors for each request separately.
 
-空闲 session 会被 `unref()`。需要显式释放 adapter 持有的传输资源时调用：
+Idle sessions have `unref()` called on them. To explicitly release transport resources held by the adapter, call:
 
 ```typescript
 await nodeHttp.close();
 ```
 
-Node HTTP/2 上传写入会等待 `drain`，下载在消费端跟不上时暂停底层流；`ReadableStream` 请求体支持读取期间取消，且不会自动重试。HTTP/3 的连接管理和背压由注入的 transport 负责。
+Node HTTP/2 upload writes wait for `drain`, and downloads pause the underlying stream when the consumer cannot keep up. `ReadableStream` request bodies support cancellation during reading and are not automatically retried. The injected transport is responsible for HTTP/3 connection management and backpressure.
 
-HTTP/3 不绑定具体 QUIC 实现，调用方提供 `QuicTransport` 后从 `@nexusmc-cn/axnexus/node-http3` 创建 adapter：
+HTTP/3 is not tied to a specific QUIC implementation. Supply a `QuicTransport` to create an adapter from `@nexusmc-cn/axnexus/node-http3`:
 
 ```typescript
 import { createHttp3Adapter } from '@nexusmc-cn/axnexus/node-http3';
@@ -1093,34 +1093,34 @@ import { createHttp3Adapter } from '@nexusmc-cn/axnexus/node-http3';
 const http3 = createHttpClient({ adapter: createHttp3Adapter(myQuicTransport) });
 ```
 
-没有注入 transport 时会抛出 `ERR_UNSUPPORTED_ADAPTER`。默认入口不会加载 Node 内置模块；默认 Fetch adapter 不提供底层协议探测，完整响应中的 `protocol` 为 `'unknown'`。
+Without an injected transport, `ERR_UNSUPPORTED_ADAPTER` is thrown. The default entry point does not load Node built-in modules. The default Fetch adapter does not inspect the underlying protocol, so complete responses report `protocol: 'unknown'`.
 
-### Bun 运行时
+### Bun runtime
 
-根入口依赖标准 Fetch、Headers、Response、ReadableStream、Blob 和 AbortSignal。Bun 的支持范围取决于这些 Web API 以及所选 adapter 的兼容性：
+The root entry point depends on standard Fetch, Headers, Response, ReadableStream, Blob, and AbortSignal. Bun support depends on these Web APIs and the compatibility of the selected adapter:
 
-| 入口/功能 | Bun 状态 | 说明 |
+| Entry point/feature | Bun status | Notes |
 | --- | --- | --- |
-| `@nexusmc-cn/axnexus` | 标准 Web API | 使用 Bun 提供的 Fetch 及相关 Web API |
-| `@nexusmc-cn/axnexus/node-http2` | 实验性 | 依赖 Bun 的 `node:http2` 兼容层，使用前应覆盖实际所需的 TLS、ALPN、session 复用和错误隔离场景 |
-| `@nexusmc-cn/axnexus/node-http3` | 需注入 transport | 由调用方提供适用于当前运行时的 QUIC transport |
-| XHR adapter | 浏览器专用 | Bun 没有浏览器 XHR 时会返回 `ERR_UNSUPPORTED_ADAPTER`，不会自动 polyfill |
+| `@nexusmc-cn/axnexus` | Standard Web APIs | Uses Bun's Fetch and related Web APIs |
+| `@nexusmc-cn/axnexus/node-http2` | Experimental | Depends on Bun's `node:http2` compatibility layer; validate the TLS, ALPN, session reuse, and error-isolation scenarios you need before use |
+| `@nexusmc-cn/axnexus/node-http3` | Injected transport required | The caller supplies a QUIC transport suitable for the current runtime |
+| XHR adapter | Browser only | Returns `ERR_UNSUPPORTED_ADAPTER` when browser XHR is unavailable in Bun; no automatic polyfill |
 
-跨运行时的 `RequestConfig` 不包含 Bun 专有 Fetch 选项；需要运行时扩展时，可通过 `createFetchAdapter` 注入自定义 fetch 实现。
+The cross-runtime `RequestConfig` does not include Bun-specific Fetch options. For runtime-specific extensions, inject a custom fetch implementation through `createFetchAdapter`.
 
-## 运行环境差异
+## Runtime differences
 
-| 能力 | 浏览器 Fetch | 浏览器 XHR | Node.js 20+ Fetch | Node.js HTTP/2 | 注入式 HTTP/3 |
+| Capability | Browser Fetch | Browser XHR | Node.js 20+ Fetch | Node.js HTTP/2 | Injected HTTP/3 |
 | --- | --- | --- | --- | --- | --- |
-| JSON、文本、Blob、ArrayBuffer | 支持 | 支持 | 支持 | 支持 | 由 transport 决定 |
-| AbortSignal 和超时 | 支持 | 支持 | 支持 | 支持 | 由 transport 决定 |
-| 下载进度 | response body 可读时支持 | 支持 | response body 可读时支持 | 支持 | 由 transport 决定 |
-| 上传进度 | 标准 Fetch 不保证 | 支持 `xhr.upload` | 标准 Fetch 不保证 | 由 adapter 实现 | 由 transport 决定 |
-| HTTP/2 | 浏览器自行协商，客户端不强制 | 浏览器自行协商 | 默认 Fetch 不强制 | `@nexusmc-cn/axnexus/node-http2` | 不适用 |
-| HTTP/3 | 浏览器自行协商 | 浏览器自行协商 | 默认不启用 | 不适用 | `@nexusmc-cn/axnexus/node-http3` + QUIC transport |
+| JSON, text, Blob, ArrayBuffer | Supported | Supported | Supported | Supported | Depends on transport |
+| AbortSignal and timeouts | Supported | Supported | Supported | Supported | Depends on transport |
+| Download progress | When the response body is readable | Supported | When the response body is readable | Supported | Depends on transport |
+| Upload progress | Not guaranteed by standard Fetch | Supported via `xhr.upload` | Not guaranteed by standard Fetch | Implemented by the adapter | Depends on transport |
+| HTTP/2 | Negotiated by the browser; not forced by the client | Negotiated by the browser | Not forced by the default Fetch adapter | `@nexusmc-cn/axnexus/node-http2` | Not applicable |
+| HTTP/3 | Negotiated by the browser | Negotiated by the browser | Disabled by default | Not applicable | `@nexusmc-cn/axnexus/node-http3` + QUIC transport |
 
-Node.js HTTP/2 和 HTTP/3 入口不会被默认入口加载。
+The default entry point does not load the Node.js HTTP/2 or HTTP/3 entry points.
 
-## 许可证
+## License
 
 MIT
