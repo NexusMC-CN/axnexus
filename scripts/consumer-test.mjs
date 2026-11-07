@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, access, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, writeFile, access, realpath, copyFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -23,20 +23,20 @@ const pnpm = (args, cwd) => run(pnpmCli, args, cwd);
 const packageName = '@nexusmc-cn/axnexus';
 
 try {
-  // pnpm pack returns one object and accepts ignore-scripts as a config option.
-  const packed = JSON.parse(pnpm(['--config.ignore-scripts=true', 'pack', '--json', '--pack-destination', temporary], root));
-  assert.equal(packed.name, packageName);
-  const tarball = resolve(temporary, packed.filename);
-  assert.equal(dirname(tarball), resolve(temporary));
-  await access(tarball);
-  assert(packed.files.some(file => file.path === 'dist/stream/index.js'));
-  assert(packed.files.some(file => file.path === 'src/index.ts'), 'Missing source for published source maps');
-  for (const entry of ['dist/selection/index.js', 'dist/selection/index.d.ts',
-    'dist/selection/server/index.js', 'dist/selection/server/index.d.ts',
-    'dist/integrations/fastify.js', 'dist/integrations/fastify.d.ts']) {
-    assert(packed.files.some(file => file.path === entry), `Missing selection tarball entry: ${entry}`);
+  let tarball;
+  if (process.argv[2]) {
+    // Release CI must test the exact artifact that npm will publish.
+    const supplied = resolve(process.argv[2]);
+    tarball = join(temporary, basename(supplied));
+    await copyFile(supplied, tarball);
+  } else {
+    // The ordinary CI path uses the already-built dist directory.
+    const packed = JSON.parse(pnpm(['--config.ignore-scripts=true', 'pack', '--json', '--pack-destination', temporary], root));
+    assert.equal(packed.name, packageName);
+    tarball = resolve(temporary, packed.filename);
+    assert.equal(dirname(tarball), resolve(temporary));
   }
-  assert(!packed.files.some(file => /^(?:docs|tests|scripts)\//.test(file.path)));
+  await access(tarball);
   const manifest = { name: 'axnexus-consumer', private: true, type: 'module',
     dependencies: { [packageName]: `file:./${basename(tarball)}` } };
   const install = async () => {
@@ -45,18 +45,59 @@ try {
       '--config.confirmModulesPurge=false']);
   };
   await install();
-  const requireFromPackage = createRequire(await realpath(join(temporary, 'node_modules', packageName, 'package.json')));
+  const packageRoot = await realpath(join(temporary, 'node_modules', packageName));
+  const published = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
+  assert.equal(published.name, packageName);
+  const files = new Set((await readdir(packageRoot, { recursive: true })).map(path => path.replaceAll('\\', '/')));
+  assert(files.has('dist/stream/index.js'));
+  assert(files.has('src/index.ts'), 'Missing source for published source maps');
+  assert(![...files].some(path => /^(?:docs|tests|scripts)(?:\/|$)/.test(path)), 'Unexpected development files in tarball');
+  for (const entry of Object.values(published.exports)) {
+    if (typeof entry === 'string') {
+      assert(files.has(entry.replace(/^\.\//, '')), `Missing export: ${entry}`);
+      continue;
+    }
+    for (const target of [entry.types, entry.import, entry.default]) {
+      assert.equal(typeof target, 'string', 'Missing export condition');
+      assert(files.has(target.replace(/^\.\//, '')), `Missing export: ${target}`);
+    }
+  }
+  for (const path of files) {
+    if (!path.startsWith('dist/') || !path.endsWith('.js')) continue;
+    for (const companion of [path + '.map', path.slice(0, -3) + '.d.ts', path.slice(0, -3) + '.d.ts.map']) {
+      assert(files.has(companion), `Missing published build output: ${companion}`);
+    }
+  }
+  for (const path of files) {
+    if (!path.startsWith('dist/') || !path.endsWith('.map')) continue;
+    const mapPath = join(packageRoot, path);
+    const map = JSON.parse(await readFile(mapPath, 'utf8'));
+    for (const source of map.sources) {
+      const resolved = resolve(dirname(mapPath), map.sourceRoot ?? '', source);
+      assert(resolved.startsWith(join(packageRoot, 'src') + (process.platform === 'win32' ? '\\' : '/')),
+        `Source map points outside published sources: ${path}`);
+      await access(resolved);
+    }
+  }
+  const requireFromPackage = createRequire(join(packageRoot, 'package.json'));
   for (const dependency of ['@opentelemetry/api', '@tanstack/query-core', '@orpc/client', 'fastify']) {
     await assert.rejects(access(join(temporary, 'node_modules', dependency)));
     assert.throws(() => requireFromPackage.resolve(dependency), { code: 'MODULE_NOT_FOUND' });
   }
-  const core = `import { createHttpClient, HttpError, SchemaValidationError } from '${packageName}';
+  const core = `import { createRequire } from 'node:module';
+import { createHttpClient, HttpError, SchemaValidationError } from '${packageName}';
 import { parseSSE } from '${packageName}/stream';
 import { createFetchHandler } from '${packageName}/fetch';
 import { defineEndpoint } from '${packageName}/contracts';
 import { defineSelectionResource, leaf, createSelectionClient, defineSelectionPlan, describeSelectionResource, inspectSelection } from '${packageName}/selection';
 import { implementSelection, createSelectionHandler, paginateSelection, createSelectionBatchLoader, withSelectionLoaders } from '${packageName}/selection/server';
 import { createRequestLogger } from '${packageName}/observability';
+const require = createRequire(import.meta.url);
+const metadata = require('${packageName}/package.json');
+if (metadata.name !== '${packageName}') throw new Error('Package metadata export failed');
+for (const entry of Object.keys(metadata.exports)) {
+  require.resolve(entry === '.' ? '${packageName}' : '${packageName}' + entry.slice(1));
+}
 if ([createHttpClient,HttpError,SchemaValidationError,parseSSE,createFetchHandler,defineEndpoint,defineSelectionResource,leaf,createSelectionClient,defineSelectionPlan,describeSelectionResource,inspectSelection,implementSelection,createSelectionHandler,paginateSelection,createSelectionBatchLoader,withSelectionLoaders,createRequestLogger].some(value => typeof value !== 'function')) throw new Error('Missing export');
 const client = createHttpClient({adapter: async () => new Response('{"ok":true}')});
 const value = await client.get('https://consumer.test/');
@@ -115,7 +156,7 @@ const response = await app.inject({method: 'GET', url: '/bridge'});
 if(response.statusCode !== 200 || response.json().url !== 'http://axnexus.invalid/bridge') throw new Error('Minimum Fastify peer bridge failed');
 await app.close();`);
   run(join(temporary, 'optional.mjs'), []);
-  console.log('Tarball consumer passed: core without peers, optional entries, minimum Fastify peer, NodeNext and Bundler types.');
+  console.log('Tarball consumer passed: public exports and metadata, source maps, core without peers, optional entries, minimum Fastify peer, NodeNext and Bundler types.');
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }

@@ -11,6 +11,7 @@
 - `describeSelectionResource`、`inspectSelection` 和处理器 `observe` 钩子：查看公开字段、预算与不含请求参数或响应值的执行元数据。
 - 可选 `./fastify` 入口：注册独立的 Selection POST 路由，并提供逐路由的 Web Request/Response 桥接；Fastify 5 为可选 peer，不接管现有 REST、上传或流式路由。
 - Selection 服务端处理器支持配置 `endpoint`，与 Fastify 路由前缀配合使用。
+- 增加 `v*` tag 触发的 npm 发布工作流，校验 tag 与包版本一致，并使用 provenance 发布；发布前在临时消费项目中验证实际 tarball。
 
 ### 修复
 
@@ -18,10 +19,12 @@
 - Fastify HTTP/2 桥接跳过伪首部，避免合法请求在构造 Web `Headers` 时变成 500。
 - 更新 `HttpError` 与 `SchemaValidationError` 的版本隔离键，避免 0.4.0 与 0.3.0 模块错误类互相识别。
 - 发布包包含 `src`，使 JavaScript 和声明文件的源码映射可定位到实际源文件；Fastify 开发依赖及可选 peer 下限更新至已修复安全公告的 5.12.8。
+- 声明 Node.js `>=20` 与 `sideEffects: false`，为 ESM 入口补齐 `default` 条件并导出 `package.json`；`prepack` 使用 `npm run build`，构建直接调用 Node 清理产物与 TypeScript 编译器，不再依赖 pnpm。
 
 ### 文档
 
 - 重设计 README 的任务导航、快速开始、Selection 四项扩展示例及 Fastify 接入说明；补充 Nuxt 4.5/4.6+ 的 Nitro 路由与 SSR 接入示例，并以独立消费应用验证。
+- 将完整使用说明迁至 `docs/guide.md`，README 收敛为安装、快速开始与公共入口索引，明确 Node.js 下限、ESM、可选 peer 和源码映射约定。
 
 ## 0.3.0 · 2026-10-28
 

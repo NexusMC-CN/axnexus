@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify and publish npm package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          # Release builds intentionally do not restore dependency caches.
+      - name: Set up npm for trusted publishing
+        run: npm install --global npm@11
+      - name: Check release tag and package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          assert.equal(typeof version, 'string', 'package.json must declare a version');
+          assert.match(version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/,
+            'Release versions must use stable X.Y.Z without prerelease or build metadata');
+          assert.equal(process.env.RELEASE_TAG, `v${version}`,
+            'Release tag must exactly match v${package.json version}');
+          NODE
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run Node.js tests
+        run: pnpm test
+      - name: Check public TypeScript contracts
+        run: pnpm run test:types
+      - name: Pack release artifact
+        id: pack
+        run: |
+          export PACK_DIR="$(mktemp -d "$RUNNER_TEMP/axnexus-release.XXXXXX")"
+          pnpm pack --json --pack-destination "$PACK_DIR"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { appendFileSync, readdirSync, statSync } from 'node:fs';
+          import { join } from 'node:path';
+
+          const files = readdirSync(process.env.PACK_DIR);
+          assert.equal(files.length, 1, 'Expected exactly one release artifact');
+          assert(files[0].endsWith('.tgz'), 'Expected a packed .tgz artifact');
+          const tarball = join(process.env.PACK_DIR, files[0]);
+          assert(statSync(tarball).isFile(), 'Release artifact must be a regular file');
+          appendFileSync(process.env.GITHUB_OUTPUT, `tarball=${tarball}\n`);
+          NODE
+      - name: Check release artifact consumers
+        env:
+          RELEASE_TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: pnpm run test:consumer -- "$RELEASE_TARBALL"
+      - name: Publish verified artifact with provenance
+        env:
+          RELEASE_TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: npm publish "$RELEASE_TARBALL" --provenance --access public

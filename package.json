@@ -38,61 +38,79 @@
     "registry": "https://registry.npmjs.org/"
   },
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./node-http2": {
       "types": "./dist/adapters/node-http2.d.ts",
-      "import": "./dist/adapters/node-http2.js"
+      "import": "./dist/adapters/node-http2.js",
+      "default": "./dist/adapters/node-http2.js"
     },
     "./node-http3": {
       "types": "./dist/adapters/node-http3.d.ts",
-      "import": "./dist/adapters/node-http3.js"
+      "import": "./dist/adapters/node-http3.js",
+      "default": "./dist/adapters/node-http3.js"
     },
     "./stream": {
       "types": "./dist/stream/index.d.ts",
-      "import": "./dist/stream/index.js"
+      "import": "./dist/stream/index.js",
+      "default": "./dist/stream/index.js"
     },
     "./fetch": {
       "types": "./dist/bridges/index.d.ts",
-      "import": "./dist/bridges/index.js"
+      "import": "./dist/bridges/index.js",
+      "default": "./dist/bridges/index.js"
     },
     "./contracts": {
       "types": "./dist/contracts/index.d.ts",
-      "import": "./dist/contracts/index.js"
+      "import": "./dist/contracts/index.js",
+      "default": "./dist/contracts/index.js"
     },
     "./selection": {
       "types": "./dist/selection/index.d.ts",
-      "import": "./dist/selection/index.js"
+      "import": "./dist/selection/index.js",
+      "default": "./dist/selection/index.js"
     },
     "./selection/server": {
       "types": "./dist/selection/server/index.d.ts",
-      "import": "./dist/selection/server/index.js"
+      "import": "./dist/selection/server/index.js",
+      "default": "./dist/selection/server/index.js"
     },
     "./fastify": {
       "types": "./dist/integrations/fastify.d.ts",
-      "import": "./dist/integrations/fastify.js"
+      "import": "./dist/integrations/fastify.js",
+      "default": "./dist/integrations/fastify.js"
     },
     "./plugins": {
       "types": "./dist/plugins/index.d.ts",
-      "import": "./dist/plugins/index.js"
+      "import": "./dist/plugins/index.js",
+      "default": "./dist/plugins/index.js"
     },
     "./observability": {
       "types": "./dist/observability/index.d.ts",
-      "import": "./dist/observability/index.js"
+      "import": "./dist/observability/index.js",
+      "default": "./dist/observability/index.js"
     },
     "./opentelemetry": {
       "types": "./dist/integrations/opentelemetry.d.ts",
-      "import": "./dist/integrations/opentelemetry.js"
+      "import": "./dist/integrations/opentelemetry.js",
+      "default": "./dist/integrations/opentelemetry.js"
     },
     "./tanstack-query": {
       "types": "./dist/integrations/tanstack-query.d.ts",
-      "import": "./dist/integrations/tanstack-query.js"
-    }
+      "import": "./dist/integrations/tanstack-query.js",
+      "default": "./dist/integrations/tanstack-query.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -102,7 +120,7 @@
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.json",
     "build:bun": "pnpm run clean && bun ./node_modules/typescript/bin/tsc -p tsconfig.json",
     "test": "pnpm run build && node --test --experimental-strip-types \"tests/**/*.test.ts\"",
     "test:bun": "pnpm run build:bun && bun test --cwd tests",
@@ -110,7 +128,7 @@
     "test:consumer": "node scripts/consumer-test.mjs",
     "test:nuxt": "pnpm run build && node scripts/nuxt-consumer-test.mjs",
     "test:browser": "playwright test",
-    "prepack": "pnpm run build"
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@opentelemetry/api": ">=1.9.0 <2",
